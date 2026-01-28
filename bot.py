@@ -3,9 +3,9 @@ from discord.ext import commands
 from discord.ui import Button, View, Select, Modal, TextInput
 import json
 import os
-from datetime import datetime
 import asyncio
 
+# ────── INTENTS ──────
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -16,14 +16,14 @@ bot = commands.Bot(command_prefix='.', intents=intents)
 CONFIG_FILE = 'config.json'
 PRODUTOS_FILE = 'produtos.json'
 
+# ────── CONFIG ──────
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {
         'categoria_id': None,
-        'pix_info': 'Configure seu PIX com o comando .ConfigPix',
-        'contador_carrinhos': {}
+        'pix_info': 'Configure seu PIX com o comando .ConfigPix'
     }
 
 def save_config(config):
@@ -43,18 +43,25 @@ def save_produtos(produtos):
 config = load_config()
 produtos = load_produtos()
 
-def is_owner():
-    async def predicate(ctx):
-        return ctx.author.id == ctx.guild.owner_id
-    return commands.check(predicate)
-
+# ────── EVENTOS ──────
 @bot.event
 async def on_ready():
     print(f'🤖 Conectado como {bot.user}')
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="vendas | .ajuda"))
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name="vendas | .ajuda"
+        )
+    )
 
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ Você não tem permissão para usar este comando.")
+
+# ────── COMANDOS ──────
 @bot.command(name='ajuda')
-@is_owner()
+@commands.has_permissions(administrator=True)
 async def ajuda(ctx):
     embed = discord.Embed(title="📋 Comandos", color=discord.Color.blue())
     embed.add_field(name=".ConfigCategoria", value="Definir categoria dos carrinhos", inline=False)
@@ -65,7 +72,7 @@ async def ajuda(ctx):
     await ctx.send(embed=embed)
 
 @bot.command(name='ConfigCategoria')
-@is_owner()
+@commands.has_permissions(administrator=True)
 async def config_categoria(ctx):
     categorias = ctx.guild.categories
     options = [discord.SelectOption(label=cat.name, value=str(cat.id)) for cat in categorias[:25]]
@@ -81,6 +88,7 @@ async def config_categoria(ctx):
     view.add_item(select)
     await ctx.send("Escolha a categoria:", view=view)
 
+# ────── MODAL PRODUTO ──────
 class CriarProdutoModal(Modal):
     def __init__(self):
         super().__init__(title="Criar Produto")
@@ -102,7 +110,7 @@ class CriarProdutoModal(Modal):
         await interaction.response.send_message("✅ Produto criado!", ephemeral=True)
 
 @bot.command(name='CriarProduto')
-@is_owner()
+@commands.has_permissions(administrator=True)
 async def criar_produto(ctx):
     button = Button(label="Criar Produto", style=discord.ButtonStyle.green)
 
@@ -115,15 +123,15 @@ async def criar_produto(ctx):
     await ctx.send("Clique para criar um produto:", view=view)
 
 @bot.command(name='ListarProdutos')
-@is_owner()
+@commands.has_permissions(administrator=True)
 async def listar(ctx):
-    embed = discord.Embed(title="Produtos")
-    for k, v in produtos.items():
+    embed = discord.Embed(title="📦 Produtos")
+    for v in produtos.values():
         embed.add_field(name=v['titulo'], value=f"R$ {v['preco']}", inline=False)
     await ctx.send(embed=embed)
 
 @bot.command(name='EnviarPainel')
-@is_owner()
+@commands.has_permissions(administrator=True)
 async def enviar_painel(ctx):
     options = [discord.SelectOption(label=p['titulo'], value=i) for i, p in produtos.items()]
     select = Select(placeholder="Escolha o produto", options=options)
@@ -141,13 +149,14 @@ async def enviar_painel(ctx):
         view = View(timeout=None)
         view.add_item(button)
         await interaction.channel.send(embed=embed, view=view)
-        await interaction.response.send_message("✅ Painel enviado", ephemeral=True)
+        await interaction.response.send_message("✅ Painel enviado!", ephemeral=True)
 
     select.callback = callback
     view = View()
     view.add_item(select)
     await ctx.send("Selecione o produto:", view=view)
 
+# ────── CARRINHO ──────
 async def criar_carrinho(interaction, produto):
     guild = interaction.guild
     user = interaction.user
@@ -159,35 +168,28 @@ async def criar_carrinho(interaction, produto):
         guild.me: discord.PermissionOverwrite(read_messages=True)
     }
 
-    canal = await categoria.create_text_channel(f"🚀{user.name}", overwrites=overwrites)
+    canal = await categoria.create_text_channel(f"🚀-{user.name}", overwrites=overwrites)
 
     embed = discord.Embed(title="🛒 Carrinho", description=produto['descricao'])
     embed.add_field(name="Valor", value=f"R$ {produto['preco']}")
     embed.add_field(name="PIX", value=config['pix_info'], inline=False)
 
-    aprovar = Button(label="✅ Aprovar", style=discord.ButtonStyle.success)
     fechar = Button(label="🔒 Fechar", style=discord.ButtonStyle.danger)
 
-    async def aprovar_cb(i):
-        await i.response.send_message("Pagamento aprovado! 🎉")
-
     async def fechar_cb(i):
-        await i.response.send_message("Fechando em 5s...")
+        await i.response.send_message("Fechando em 5 segundos...")
         await asyncio.sleep(5)
         await canal.delete()
 
-    aprovar.callback = aprovar_cb
     fechar.callback = fechar_cb
-
     view = View(timeout=None)
-    view.add_item(aprovar)
     view.add_item(fechar)
 
     await canal.send(user.mention, embed=embed, view=view)
-    await interaction.response.send_message(f"Carrinho criado: {canal.mention}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Carrinho criado: {canal.mention}", ephemeral=True)
 
 @bot.command(name='ConfigPix')
-@is_owner()
+@commands.has_permissions(administrator=True)
 async def config_pix(ctx):
     modal = Modal(title="Configurar PIX")
     pix = TextInput(label="Dados do PIX", style=discord.TextStyle.paragraph)
@@ -196,9 +198,10 @@ async def config_pix(ctx):
     async def submit(interaction):
         config['pix_info'] = pix.value
         save_config(config)
-        await interaction.response.send_message("✅ PIX configurado", ephemeral=True)
+        await interaction.response.send_message("✅ PIX configurado!", ephemeral=True)
 
     modal.on_submit = submit
+
     button = Button(label="Configurar PIX")
 
     async def callback(interaction):
@@ -209,5 +212,6 @@ async def config_pix(ctx):
     view.add_item(button)
     await ctx.send("Clique para configurar o PIX:", view=view)
 
+# ────── START ──────
 TOKEN = os.getenv("DISCORD_TOKEN")
 bot.run(TOKEN)
