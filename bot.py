@@ -18,6 +18,7 @@ bot = commands.Bot(command_prefix='.', intents=intents)
 CONFIG_FILE = 'config.json'
 PRODUTOS_FILE = 'produtos.json'
 PRODUTOS_DROP_FILE = 'produtos_drop.json'
+ESTOQUE_FILE = 'estoque.json'
 
 # Carregar ou criar configuração
 def load_config():
@@ -55,6 +56,40 @@ def load_produtos_drop():
 def save_produtos_drop(produtos_drop):
     with open(PRODUTOS_DROP_FILE, 'w', encoding='utf-8') as f:
         json.dump(produtos_drop, f, indent=4, ensure_ascii=False)
+
+def load_estoque():
+    if os.path.exists(ESTOQUE_FILE):
+        with open(ESTOQUE_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_estoque(estoque):
+    with open(ESTOQUE_FILE, 'w', encoding='utf-8') as f:
+        json.dump(estoque, f, indent=4, ensure_ascii=False)
+
+def get_estoque(produto_id):
+    """Retorna o estoque de um produto (ilimitado se não configurado)"""
+    estoque = load_estoque()
+    return estoque.get(produto_id, {'quantidade': -1, 'ilimitado': True})
+
+def diminuir_estoque(produto_id):
+    """Diminui o estoque de um produto em 1"""
+    estoque = load_estoque()
+    if produto_id in estoque and not estoque[produto_id].get('ilimitado', True):
+        if estoque[produto_id]['quantidade'] > 0:
+            estoque[produto_id]['quantidade'] -= 1
+            save_estoque(estoque)
+            return True
+    return True  # Retorna True se for ilimitado
+
+def set_estoque(produto_id, quantidade, ilimitado=False):
+    """Define o estoque de um produto"""
+    estoque = load_estoque()
+    estoque[produto_id] = {
+        'quantidade': quantidade if not ilimitado else -1,
+        'ilimitado': ilimitado
+    }
+    save_estoque(estoque)
 
 config = load_config()
 produtos = load_produtos()
@@ -115,6 +150,11 @@ async def ajuda(ctx):
     embed.add_field(
         name=".EnviarPainelDrop",
         value="Envie um painel dropdown para um canal específico",
+        inline=False
+    )
+    embed.add_field(
+        name=".EstoqueProduto",
+        value="Configure o estoque de produtos (normais e dropdown)",
         inline=False
     )
     embed.add_field(
@@ -187,6 +227,135 @@ async def config_categoria(ctx):
     
     await ctx.send(embed=embed, view=view)
 
+# Modal para configurar estoque
+class ConfigEstoqueModal(Modal):
+    def __init__(self, produto_id, produto_nome):
+        super().__init__(title=f"Estoque - {produto_nome[:30]}")
+        self.produto_id = produto_id
+        
+        estoque_atual = get_estoque(produto_id)
+        
+        self.quantidade = TextInput(
+            label="Quantidade em Estoque",
+            placeholder="Digite a quantidade (ou deixe vazio para ilimitado)",
+            required=False,
+            max_length=10,
+            default=str(estoque_atual['quantidade']) if estoque_atual['quantidade'] > 0 else ""
+        )
+        
+        self.add_item(self.quantidade)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        if self.quantidade.value.strip() == "":
+            # Estoque ilimitado
+            set_estoque(self.produto_id, -1, ilimitado=True)
+            await interaction.response.send_message(
+                f"✅ Estoque configurado como **ILIMITADO** para o produto!",
+                ephemeral=True
+            )
+        else:
+            try:
+                qtd = int(self.quantidade.value)
+                if qtd < 0:
+                    await interaction.response.send_message(
+                        "❌ A quantidade não pode ser negativa!",
+                        ephemeral=True
+                    )
+                    return
+                
+                set_estoque(self.produto_id, qtd, ilimitado=False)
+                await interaction.response.send_message(
+                    f"✅ Estoque configurado: **{qtd} unidades**",
+                    ephemeral=True
+                )
+            except ValueError:
+                await interaction.response.send_message(
+                    "❌ Digite um número válido!",
+                    ephemeral=True
+                )
+
+# Comando para configurar estoque
+@bot.command(name='EstoqueProduto')
+@is_owner_or_admin()
+async def estoque_produto(ctx):
+    if not produtos and not produtos_drop:
+        await ctx.send("❌ Nenhum produto cadastrado ainda!")
+        return
+    
+    embed = discord.Embed(
+        title="📦 Configurar Estoque",
+        description="Selecione um produto para configurar o estoque:",
+        color=discord.Color.blue()
+    )
+    
+    # Criar opções combinando produtos normais e dropdown
+    options = []
+    
+    # Adicionar produtos normais
+    for prod_id, prod in produtos.items():
+        estoque_info = get_estoque(prod_id)
+        estoque_text = "♾️ Ilimitado" if estoque_info['ilimitado'] else f"📦 {estoque_info['quantidade']} un."
+        
+        options.append(
+            discord.SelectOption(
+                label=f"{prod['titulo'][:80]}",
+                value=prod_id,
+                description=f"R$ {prod['preco']} | {estoque_text}",
+                emoji="📦"
+            )
+        )
+    
+    # Adicionar produtos dropdown (cada opção individualmente)
+    for drop_id, drop in produtos_drop.items():
+        for i, opcao in enumerate(drop['opcoes']):
+            opcao_id = f"{drop_id}_opt_{i}"
+            estoque_info = get_estoque(opcao_id)
+            estoque_text = "♾️ Ilimitado" if estoque_info['ilimitado'] else f"📦 {estoque_info['quantidade']} un."
+            
+            options.append(
+                discord.SelectOption(
+                    label=f"{opcao['nome'][:80]}",
+                    value=opcao_id,
+                    description=f"R$ {opcao['preco']} | {estoque_text}",
+                    emoji=opcao['emoji']
+                )
+            )
+    
+    if not options:
+        await ctx.send("❌ Nenhum produto encontrado!")
+        return
+    
+    # Limitar a 25 opções (limite do Discord)
+    if len(options) > 25:
+        options = options[:25]
+        embed.set_footer(text="⚠️ Mostrando apenas os primeiros 25 produtos")
+    
+    select = Select(placeholder="Escolha um produto...", options=options)
+    
+    async def select_callback(interaction):
+        produto_id = select.values[0]
+        
+        # Encontrar o nome do produto
+        produto_nome = ""
+        if produto_id in produtos:
+            produto_nome = produtos[produto_id]['titulo']
+        else:
+            # É um produto dropdown
+            for drop_id, drop in produtos_drop.items():
+                if produto_id.startswith(drop_id):
+                    opcao_index = int(produto_id.split('_opt_')[1])
+                    produto_nome = f"{drop['titulo_painel']} - {drop['opcoes'][opcao_index]['nome']}"
+                    break
+        
+        modal = ConfigEstoqueModal(produto_id, produto_nome)
+        await interaction.response.send_modal(modal)
+    
+    select.callback = select_callback
+    view = View()
+    view.add_item(select)
+    
+    await ctx.send(embed=embed, view=view)
+
 # Modal para criar produto
 class CriarProdutoModal(Modal):
     def __init__(self):
@@ -236,9 +405,12 @@ class CriarProdutoModal(Modal):
         
         save_produtos(produtos)
         
+        # Configurar estoque como ilimitado por padrão
+        set_estoque(produto_id, -1, ilimitado=True)
+        
         embed = discord.Embed(
             title="✅ Produto Criado com Sucesso!",
-            description=f"**ID:** {produto_id}\n**Título:** {self.titulo.value}",
+            description=f"**ID:** {produto_id}\n**Título:** {self.titulo.value}\n**Estoque:** Ilimitado (configure com .EstoqueProduto)",
             color=discord.Color.green()
         )
         
@@ -324,12 +496,17 @@ class CriarProdutoDropModal1(Modal):
             produtos_drop[drop_id]['criado_em'] = datetime.now().isoformat()
             save_produtos_drop(produtos_drop)
             
+            # Configurar estoque ilimitado para cada opção
+            for i in range(len(produtos_drop[drop_id]['opcoes'])):
+                opcao_id = f"{drop_id}_opt_{i}"
+                set_estoque(opcao_id, -1, ilimitado=True)
+            
             # Limpar dados temporários
             del bot.temp_produtos_drop[temp_id]
             
             embed = discord.Embed(
                 title="✅ Painel Dropdown Criado!",
-                description=f"**ID:** {drop_id}\n**Título:** {produtos_drop[drop_id]['titulo_painel']}\n**Opções:** {len(produtos_drop[drop_id]['opcoes'])}",
+                description=f"**ID:** {drop_id}\n**Título:** {produtos_drop[drop_id]['titulo_painel']}\n**Opções:** {len(produtos_drop[drop_id]['opcoes'])}\n**Estoque:** Ilimitado para todas (configure com .EstoqueProduto)",
                 color=discord.Color.green()
             )
             
@@ -475,9 +652,12 @@ async def listar_produtos(ctx):
     )
     
     for prod_id, prod in produtos.items():
+        estoque_info = get_estoque(prod_id)
+        estoque_text = "♾️ Ilimitado" if estoque_info['ilimitado'] else f"📦 Estoque: {estoque_info['quantidade']} un."
+        
         embed.add_field(
             name=f"{prod['titulo']} ({prod_id})",
-            value=f"💰 R$ {prod['preco']}\n📝 {prod['descricao'][:50]}...",
+            value=f"💰 R$ {prod['preco']}\n{estoque_text}\n📝 {prod['descricao'][:50]}...",
             inline=False
         )
     
@@ -497,9 +677,15 @@ async def listar_produtos_drop(ctx):
     )
     
     for drop_id, drop in produtos_drop.items():
-        opcoes_text = "\n".join([f"• {op['nome']} - R$ {op['preco']}" for op in drop['opcoes'][:3]])
+        opcoes_text = ""
+        for i, op in enumerate(drop['opcoes'][:3]):
+            opcao_id = f"{drop_id}_opt_{i}"
+            estoque_info = get_estoque(opcao_id)
+            estoque_text = "♾️" if estoque_info['ilimitado'] else f"({estoque_info['quantidade']})"
+            opcoes_text += f"• {op['nome']} - R$ {op['preco']} {estoque_text}\n"
+        
         if len(drop['opcoes']) > 3:
-            opcoes_text += f"\n... e mais {len(drop['opcoes']) - 3} opções"
+            opcoes_text += f"... e mais {len(drop['opcoes']) - 3} opções"
         
         embed.add_field(
             name=f"{drop['emoji_painel']} {drop['titulo_painel']} ({drop_id})",
@@ -531,6 +717,7 @@ async def enviar_painel(ctx):
     async def select_callback(interaction):
         prod_id = select.values[0]
         produto = produtos[prod_id]
+        estoque_info = get_estoque(prod_id)
         
         # Criar embed do produto
         embed = discord.Embed(
@@ -540,15 +727,35 @@ async def enviar_painel(ctx):
         )
         embed.add_field(name="💰 Preço", value=f"R$ {produto['preco']}", inline=True)
         
+        # Adicionar informação de estoque
+        if estoque_info['ilimitado']:
+            embed.add_field(name="📦 Estoque", value="♾️ Ilimitado", inline=True)
+        else:
+            embed.add_field(name="📦 Estoque", value=f"{estoque_info['quantidade']} unidades", inline=True)
+        
         if produto['gif_url']:
             embed.set_image(url=produto['gif_url'])
         
         embed.set_footer(text="Clique em 'Comprar' para iniciar sua compra!")
         
-        # Botão de comprar
-        button = Button(label="🛒 Comprar", style=discord.ButtonStyle.success)
+        # Botão de comprar (desabilitar se sem estoque)
+        sem_estoque = not estoque_info['ilimitado'] and estoque_info['quantidade'] <= 0
+        button = Button(
+            label="🛒 Comprar" if not sem_estoque else "❌ Sem Estoque",
+            style=discord.ButtonStyle.success if not sem_estoque else discord.ButtonStyle.danger,
+            disabled=sem_estoque
+        )
         
         async def comprar_callback(button_interaction):
+            # Verificar estoque novamente antes de criar carrinho
+            estoque_atual = get_estoque(prod_id)
+            if not estoque_atual['ilimitado'] and estoque_atual['quantidade'] <= 0:
+                await button_interaction.response.send_message(
+                    "❌ Produto sem estoque no momento!",
+                    ephemeral=True
+                )
+                return
+            
             await criar_carrinho(button_interaction, produto, prod_id)
         
         button.callback = comprar_callback
@@ -609,11 +816,18 @@ async def enviar_painel_drop(ctx):
         # Criar select menu com as opções
         opcoes_select = []
         for i, opcao in enumerate(painel['opcoes'][:25]):  # Máximo 25 opções
+            opcao_id = f"{drop_id}_opt_{i}"
+            estoque_info = get_estoque(opcao_id)
+            
+            # Adicionar estoque na descrição
+            estoque_text = "♾️ Ilimitado" if estoque_info['ilimitado'] else f"📦 Estoque: {estoque_info['quantidade']}"
+            descricao = f"{opcao['descricao']} | {estoque_text}"
+            
             opcoes_select.append(
                 discord.SelectOption(
                     label=opcao['nome'],
                     value=str(i),
-                    description=opcao['descricao'],
+                    description=descricao[:100],  # Limite de caracteres
                     emoji=opcao['emoji']
                 )
             )
@@ -626,6 +840,16 @@ async def enviar_painel_drop(ctx):
         async def produto_select_callback(select_interaction):
             opcao_index = int(produto_select.values[0])
             opcao_selecionada = painel['opcoes'][opcao_index]
+            opcao_id = f"{drop_id}_opt_{opcao_index}"
+            
+            # Verificar estoque
+            estoque_info = get_estoque(opcao_id)
+            if not estoque_info['ilimitado'] and estoque_info['quantidade'] <= 0:
+                await select_interaction.response.send_message(
+                    "❌ Esta opção está sem estoque no momento!",
+                    ephemeral=True
+                )
+                return
             
             # Criar "produto" temporário para o carrinho
             produto_temp = {
@@ -635,7 +859,7 @@ async def enviar_painel_drop(ctx):
                 'gif_url': painel['gif_url']
             }
             
-            await criar_carrinho(select_interaction, produto_temp, f"{drop_id}_{opcao_index}")
+            await criar_carrinho(select_interaction, produto_temp, opcao_id)
         
         produto_select.callback = produto_select_callback
         view = View(timeout=None)
@@ -696,6 +920,10 @@ async def criar_carrinho(interaction, produto, prod_id):
     nome_canal = f"🚀{user.name}-{numero}"
     canal = await categoria.create_text_channel(name=nome_canal, overwrites=overwrites)
     
+    # Obter estoque atual
+    estoque_info = get_estoque(prod_id)
+    estoque_text = "♾️ Ilimitado" if estoque_info['ilimitado'] else f"📦 {estoque_info['quantidade']} unidades disponíveis"
+    
     # Embed do carrinho
     embed = discord.Embed(
         title=f"🛒 Carrinho de Compra - {produto['titulo']}",
@@ -705,6 +933,7 @@ async def criar_carrinho(interaction, produto, prod_id):
     
     embed.add_field(name="💰 Valor", value=f"R$ {produto['preco']}", inline=True)
     embed.add_field(name="👤 Cliente", value=user.mention, inline=True)
+    embed.add_field(name="📦 Estoque", value=estoque_text, inline=True)
     
     embed.add_field(
         name="\n📱 Informações de Pagamento - PIX",
@@ -729,9 +958,40 @@ async def criar_carrinho(interaction, produto, prod_id):
             )
             return
         
+        # Diminuir estoque
+        estoque_antes = get_estoque(prod_id)
+        diminuir_estoque(prod_id)
+        estoque_depois = get_estoque(prod_id)
+        
+        estoque_msg = ""
+        if not estoque_antes['ilimitado']:
+            estoque_msg = f"\n📦 Estoque atualizado: {estoque_antes['quantidade']} → {estoque_depois['quantidade']}"
+        
         await btn_interaction.response.send_message(
-            f"✅ Pagamento aprovado! {user.mention}, obrigado pela compra! 🎉"
+            f"✅ Pagamento aprovado! {user.mention}, obrigado pela compra! 🎉{estoque_msg}"
         )
+        
+        # Log do estoque
+        if config.get('logs_privado_id'):
+            log_channel = guild.get_channel(config['logs_privado_id'])
+            if log_channel:
+                log_embed = discord.Embed(
+                    title="✅ Pagamento Aprovado",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now()
+                )
+                log_embed.add_field(name="👤 Cliente", value=f"{user.mention}", inline=True)
+                log_embed.add_field(name="📦 Produto", value=produto['titulo'], inline=True)
+                log_embed.add_field(name="💰 Valor", value=f"R$ {produto['preco']}", inline=True)
+                
+                if not estoque_depois['ilimitado']:
+                    log_embed.add_field(
+                        name="📊 Estoque",
+                        value=f"{estoque_antes['quantidade']} → {estoque_depois['quantidade']}",
+                        inline=True
+                    )
+                
+                await log_channel.send(embed=log_embed)
     
     async def fechar_callback(btn_interaction):
         if btn_interaction.user.id != guild.owner_id and not btn_interaction.user.guild_permissions.administrator and btn_interaction.user.id != user.id:
