@@ -18,7 +18,6 @@ bot = commands.Bot(command_prefix='.', intents=intents)
 CONFIG_FILE = 'config.json'
 PRODUTOS_FILE = 'produtos.json'
 PRODUTOS_DROP_FILE = 'produtos_drop.json'
-ESTOQUE_FILE = 'estoque.json'
 
 # Carregar ou criar configuração
 def load_config():
@@ -27,9 +26,8 @@ def load_config():
             return json.load(f)
     return {
         'categoria_id': None,
-        'logs_privado_id': None,
-        'feedback_channel_id': None,
         'pix_info': 'Configure seu PIX com o comando .ConfigPix',
+        'qrcode_url': None,
         'contador_carrinhos': {}
     }
 
@@ -57,40 +55,6 @@ def save_produtos_drop(produtos_drop):
     with open(PRODUTOS_DROP_FILE, 'w', encoding='utf-8') as f:
         json.dump(produtos_drop, f, indent=4, ensure_ascii=False)
 
-def load_estoque():
-    if os.path.exists(ESTOQUE_FILE):
-        with open(ESTOQUE_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
-
-def save_estoque(estoque):
-    with open(ESTOQUE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(estoque, f, indent=4, ensure_ascii=False)
-
-def get_estoque(produto_id):
-    """Retorna o estoque de um produto (ilimitado se não configurado)"""
-    estoque = load_estoque()
-    return estoque.get(produto_id, {'quantidade': -1, 'ilimitado': True})
-
-def diminuir_estoque(produto_id):
-    """Diminui o estoque de um produto em 1"""
-    estoque = load_estoque()
-    if produto_id in estoque and not estoque[produto_id].get('ilimitado', True):
-        if estoque[produto_id]['quantidade'] > 0:
-            estoque[produto_id]['quantidade'] -= 1
-            save_estoque(estoque)
-            return True
-    return True  # Retorna True se for ilimitado
-
-def set_estoque(produto_id, quantidade, ilimitado=False):
-    """Define o estoque de um produto"""
-    estoque = load_estoque()
-    estoque[produto_id] = {
-        'quantidade': quantidade if not ilimitado else -1,
-        'ilimitado': ilimitado
-    }
-    save_estoque(estoque)
-
 config = load_config()
 produtos = load_produtos()
 produtos_drop = load_produtos_drop()
@@ -114,8 +78,448 @@ async def on_ready():
     print(f'🎯 Pronto para vendas!')
     await bot.change_presence(activity=discord.Activity(
         type=discord.ActivityType.watching, 
-        name="vendas | .ajuda"
+        name="vendas | .setup"
     ))
+
+# Comando SETUP - Painel principal
+@bot.command(name='setup')
+@is_owner_or_admin()
+async def setup(ctx):
+    embed = discord.Embed(
+        title="⚙️ Painel de Configuração",
+        description="**Bem-vindo ao sistema de vendas!**\n\nEscolha uma opção abaixo para configurar seu bot:",
+        color=discord.Color.blue()
+    )
+    
+    categoria_status = "✅ Configurada" if config.get('categoria_id') else "❌ Não configurada"
+    pix_status = "✅ Configurado" if config.get('pix_info') != 'Configure seu PIX com o comando .ConfigPix' else "❌ Não configurado"
+    qrcode_status = "✅ Configurado" if config.get('qrcode_url') else "❌ Não configurado"
+    produtos_count = len(produtos)
+    produtos_drop_count = len(produtos_drop)
+    
+    embed.add_field(name="📁 Categoria", value=categoria_status, inline=True)
+    embed.add_field(name="💳 PIX", value=pix_status, inline=True)
+    embed.add_field(name="📱 QR Code", value=qrcode_status, inline=True)
+    embed.add_field(name="📦 Produtos", value=f"{produtos_count} cadastrados", inline=True)
+    embed.add_field(name="📋 Produtos Drop", value=f"{produtos_drop_count} cadastrados", inline=True)
+    
+    embed.set_footer(text="Use os botões abaixo para gerenciar o bot")
+    
+    # Criar botões
+    btn_categoria = Button(label="📁 Configurar Categoria", style=discord.ButtonStyle.primary, row=0)
+    btn_pix = Button(label="💳 Configurar PIX", style=discord.ButtonStyle.primary, row=0)
+    btn_qrcode = Button(label="📱 Configurar QR Code", style=discord.ButtonStyle.primary, row=0)
+    
+    btn_criar_produto = Button(label="➕ Criar Produto", style=discord.ButtonStyle.success, row=1)
+    btn_criar_drop = Button(label="📋 Criar Produto Drop", style=discord.ButtonStyle.success, row=1)
+    
+    btn_editar_produto = Button(label="✏️ Editar Produto", style=discord.ButtonStyle.secondary, row=2)
+    btn_editar_drop = Button(label="✏️ Editar Produto Drop", style=discord.ButtonStyle.secondary, row=2)
+    
+    btn_enviar_painel = Button(label="📤 Enviar Painel", style=discord.ButtonStyle.success, row=3)
+    btn_enviar_drop = Button(label="📤 Enviar Painel Drop", style=discord.ButtonStyle.success, row=3)
+    
+    btn_listar_produtos = Button(label="📋 Listar Produtos", style=discord.ButtonStyle.secondary, row=4)
+    btn_listar_drop = Button(label="📋 Listar Produtos Drop", style=discord.ButtonStyle.secondary, row=4)
+    
+    # Callbacks
+    async def categoria_callback(interaction):
+        categorias = [cat for cat in interaction.guild.categories]
+        
+        if not categorias:
+            await interaction.response.send_message("❌ Nenhuma categoria encontrada!", ephemeral=True)
+            return
+        
+        options = [
+            discord.SelectOption(label=cat.name, value=str(cat.id), description=f"ID: {cat.id}")
+            for cat in categorias[:25]
+        ]
+        
+        select = Select(placeholder="Escolha uma categoria...", options=options)
+        
+        async def select_callback(select_interaction):
+            config['categoria_id'] = int(select.values[0])
+            save_config(config)
+            await select_interaction.response.send_message(
+                f"✅ Categoria configurada com sucesso!",
+                ephemeral=True
+            )
+        
+        select.callback = select_callback
+        view_select = View()
+        view_select.add_item(select)
+        
+        embed_cat = discord.Embed(
+            title="📁 Configurar Categoria",
+            description="Selecione a categoria onde os carrinhos serão criados:",
+            color=discord.Color.green()
+        )
+        
+        await interaction.response.send_message(embed=embed_cat, view=view_select, ephemeral=True)
+    
+    async def pix_callback(interaction):
+        modal = Modal(title="Configurar PIX")
+        
+        pix_input = TextInput(
+            label="Informações do PIX",
+            placeholder="Ex: Chave PIX: seuemail@exemplo.com\nTitular: Seu Nome",
+            style=discord.TextStyle.paragraph,
+            max_length=500,
+            default=config.get('pix_info', '')
+        )
+        
+        modal.add_item(pix_input)
+        
+        async def on_submit(modal_interaction):
+            config['pix_info'] = pix_input.value
+            save_config(config)
+            
+            embed_pix = discord.Embed(
+                title="✅ PIX Configurado",
+                description="Informações do PIX atualizadas com sucesso!",
+                color=discord.Color.green()
+            )
+            
+            await modal_interaction.response.send_message(embed=embed_pix, ephemeral=True)
+        
+        modal.on_submit = on_submit
+        await interaction.response.send_modal(modal)
+    
+    async def qrcode_callback(interaction):
+        await interaction.response.send_message(
+            "📱 Envie a imagem do QR Code PIX neste canal (você tem 60 segundos):",
+            ephemeral=True
+        )
+        
+        def check(m):
+            return m.author == interaction.user and m.channel == interaction.channel and len(m.attachments) > 0
+        
+        try:
+            msg = await bot.wait_for('message', timeout=60.0, check=check)
+            
+            if msg.attachments:
+                attachment = msg.attachments[0]
+                
+                if attachment.content_type and attachment.content_type.startswith('image/'):
+                    config['qrcode_url'] = attachment.url
+                    save_config(config)
+                    
+                    embed_qr = discord.Embed(
+                        title="✅ QR Code Configurado",
+                        description="QR Code do PIX configurado com sucesso!",
+                        color=discord.Color.green()
+                    )
+                    embed_qr.set_image(url=attachment.url)
+                    
+                    await interaction.followup.send(embed=embed_qr, ephemeral=True)
+                    await msg.delete()
+                else:
+                    await interaction.followup.send("❌ O arquivo enviado não é uma imagem válida!", ephemeral=True)
+            
+        except asyncio.TimeoutError:
+            await interaction.followup.send("❌ Tempo esgotado! Tente novamente.", ephemeral=True)
+    
+    async def criar_produto_callback(interaction):
+        modal = CriarProdutoModal()
+        await interaction.response.send_modal(modal)
+    
+    async def criar_drop_callback(interaction):
+        modal = CriarProdutoDropModal1()
+        await interaction.response.send_modal(modal)
+    
+    async def editar_produto_callback(interaction):
+        if not produtos:
+            await interaction.response.send_message("❌ Nenhum produto cadastrado!", ephemeral=True)
+            return
+        
+        options = [
+            discord.SelectOption(
+                label=prod['titulo'],
+                value=prod_id,
+                description=f"R$ {prod['preco']}"
+            )
+            for prod_id, prod in produtos.items()
+        ]
+        
+        select = Select(placeholder="Escolha o produto para editar...", options=options[:25])
+        
+        async def select_callback(select_interaction):
+            prod_id = select.values[0]
+            produto = produtos[prod_id]
+            
+            modal = EditarProdutoModal(prod_id, produto)
+            await select_interaction.response.send_modal(modal)
+        
+        select.callback = select_callback
+        view_select = View()
+        view_select.add_item(select)
+        
+        embed_edit = discord.Embed(
+            title="✏️ Editar Produto",
+            description="Selecione o produto que deseja editar:",
+            color=discord.Color.blue()
+        )
+        
+        await interaction.response.send_message(embed=embed_edit, view=view_select, ephemeral=True)
+    
+    async def editar_drop_callback(interaction):
+        if not produtos_drop:
+            await interaction.response.send_message("❌ Nenhum painel dropdown cadastrado!", ephemeral=True)
+            return
+        
+        options = [
+            discord.SelectOption(
+                label=drop['titulo_painel'],
+                value=drop_id,
+                description=f"{len(drop['opcoes'])} opções",
+                emoji=drop['emoji_painel']
+            )
+            for drop_id, drop in produtos_drop.items()
+        ]
+        
+        select = Select(placeholder="Escolha o painel dropdown para editar...", options=options[:25])
+        
+        async def select_callback(select_interaction):
+            drop_id = select.values[0]
+            painel = produtos_drop[drop_id]
+            
+            modal = EditarProdutoDropModal1(drop_id, painel)
+            await select_interaction.response.send_modal(modal)
+        
+        select.callback = select_callback
+        view_select = View()
+        view_select.add_item(select)
+        
+        embed_edit = discord.Embed(
+            title="✏️ Editar Painel Dropdown",
+            description="Selecione o painel dropdown que deseja editar:",
+            color=discord.Color.blue()
+        )
+        
+        await interaction.response.send_message(embed=embed_edit, view=view_select, ephemeral=True)
+    
+    async def enviar_painel_callback(interaction):
+        if not produtos:
+            await interaction.response.send_message("❌ Nenhum produto cadastrado!", ephemeral=True)
+            return
+        
+        options = [
+            discord.SelectOption(
+                label=prod['titulo'],
+                value=prod_id,
+                description=f"R$ {prod['preco']}"
+            )
+            for prod_id, prod in produtos.items()
+        ]
+        
+        select = Select(placeholder="Escolha o produto...", options=options[:25])
+        
+        async def select_callback(select_interaction):
+            prod_id = select.values[0]
+            produto = produtos[prod_id]
+            
+            embed_produto = discord.Embed(
+                title=produto['titulo'],
+                description=produto['descricao'],
+                color=discord.Color.gold()
+            )
+            embed_produto.add_field(name="💰 Preço", value=f"R$ {produto['preco']}", inline=True)
+            
+            tipo_imagem = produto.get('tipo_imagem', 'gif')
+            
+            if produto.get('imagem_url'):
+                if tipo_imagem == 'gif':
+                    embed_produto.set_image(url=produto['imagem_url'])
+                else:
+                    embed_produto.set_image(url=produto['imagem_url'])
+            
+            embed_produto.set_footer(text="Clique em 'Comprar' para iniciar sua compra!")
+            
+            button = Button(label="🛒 Comprar", style=discord.ButtonStyle.success)
+            
+            async def comprar_callback(button_interaction):
+                await criar_carrinho(button_interaction, produto, prod_id)
+            
+            button.callback = comprar_callback
+            view_produto = View(timeout=None)
+            view_produto.add_item(button)
+            
+            await select_interaction.channel.send(embed=embed_produto, view=view_produto)
+            await select_interaction.response.send_message("✅ Painel enviado!", ephemeral=True)
+        
+        select.callback = select_callback
+        view_select = View()
+        view_select.add_item(select)
+        
+        embed_enviar = discord.Embed(
+            title="📤 Enviar Painel de Produto",
+            description="Selecione o produto que deseja enviar para este canal:",
+            color=discord.Color.blue()
+        )
+        
+        await interaction.response.send_message(embed=embed_enviar, view=view_select, ephemeral=True)
+    
+    async def enviar_drop_callback(interaction):
+        if not produtos_drop:
+            await interaction.response.send_message("❌ Nenhum painel dropdown cadastrado!", ephemeral=True)
+            return
+        
+        options = [
+            discord.SelectOption(
+                label=drop['titulo_painel'],
+                value=drop_id,
+                description=f"{len(drop['opcoes'])} opções disponíveis",
+                emoji=drop['emoji_painel']
+            )
+            for drop_id, drop in produtos_drop.items()
+        ]
+        
+        select = Select(placeholder="Escolha o painel dropdown...", options=options[:25])
+        
+        async def select_callback(select_interaction):
+            drop_id = select.values[0]
+            painel = produtos_drop[drop_id]
+            
+            embed_painel = discord.Embed(
+                title=f"{painel['emoji_painel']} {painel['titulo_painel']}",
+                description=painel['descricao_painel'],
+                color=discord.Color.gold()
+            )
+            
+            tipo_imagem = painel.get('tipo_imagem', 'gif')
+            
+            if painel.get('imagem_url'):
+                if tipo_imagem == 'gif':
+                    embed_painel.set_image(url=painel['imagem_url'])
+                else:
+                    embed_painel.set_image(url=painel['imagem_url'])
+            
+            embed_painel.set_footer(text="Selecione uma opção no menu abaixo para comprar!")
+            
+            opcoes_select = []
+            for i, opcao in enumerate(painel['opcoes'][:25]):
+                opcoes_select.append(
+                    discord.SelectOption(
+                        label=opcao['nome'],
+                        value=str(i),
+                        description=opcao['descricao'],
+                        emoji=opcao['emoji']
+                    )
+                )
+            
+            produto_select = Select(
+                placeholder="Selecione a quantidade de salas",
+                options=opcoes_select
+            )
+            
+            async def produto_select_callback(prod_select_interaction):
+                opcao_index = int(produto_select.values[0])
+                opcao_selecionada = painel['opcoes'][opcao_index]
+                
+                produto_temp = {
+                    'titulo': f"{painel['titulo_painel']} - {opcao_selecionada['nome']}",
+                    'descricao': f"{painel['descricao_painel']}\n\n**Opção selecionada:** {opcao_selecionada['nome']}",
+                    'preco': opcao_selecionada['preco'],
+                    'imagem_url': painel.get('imagem_url'),
+                    'tipo_imagem': painel.get('tipo_imagem', 'gif')
+                }
+                
+                await criar_carrinho(prod_select_interaction, produto_temp, f"{drop_id}_{opcao_index}")
+            
+            produto_select.callback = produto_select_callback
+            view_painel = View(timeout=None)
+            view_painel.add_item(produto_select)
+            
+            await select_interaction.channel.send(embed=embed_painel, view=view_painel)
+            await select_interaction.response.send_message("✅ Painel dropdown enviado!", ephemeral=True)
+        
+        select.callback = select_callback
+        view_select = View()
+        view_select.add_item(select)
+        
+        embed_enviar = discord.Embed(
+            title="📤 Enviar Painel Dropdown",
+            description="Selecione o painel dropdown que deseja enviar para este canal:",
+            color=discord.Color.blue()
+        )
+        
+        await interaction.response.send_message(embed=embed_enviar, view=view_select, ephemeral=True)
+    
+    async def listar_produtos_callback(interaction):
+        if not produtos:
+            await interaction.response.send_message("❌ Nenhum produto cadastrado ainda!", ephemeral=True)
+            return
+        
+        embed_lista = discord.Embed(
+            title="📦 Produtos Cadastrados",
+            color=discord.Color.blue()
+        )
+        
+        for prod_id, prod in produtos.items():
+            tipo_img = prod.get('tipo_imagem', 'gif')
+            tipo_texto = "GIF (acima)" if tipo_img == 'gif' else "Banner (embaixo)"
+            embed_lista.add_field(
+                name=f"{prod['titulo']} ({prod_id})",
+                value=f"💰 R$ {prod['preco']}\n📝 {prod['descricao'][:50]}...\n🖼️ {tipo_texto}",
+                inline=False
+            )
+        
+        await interaction.response.send_message(embed=embed_lista, ephemeral=True)
+    
+    async def listar_drop_callback(interaction):
+        if not produtos_drop:
+            await interaction.response.send_message("❌ Nenhum produto dropdown cadastrado ainda!", ephemeral=True)
+            return
+        
+        embed_lista = discord.Embed(
+            title="📋 Painéis Dropdown Cadastrados",
+            color=discord.Color.blue()
+        )
+        
+        for drop_id, drop in produtos_drop.items():
+            opcoes_text = "\n".join([f"• {op['nome']} - R$ {op['preco']}" for op in drop['opcoes'][:3]])
+            if len(drop['opcoes']) > 3:
+                opcoes_text += f"\n... e mais {len(drop['opcoes']) - 3} opções"
+            
+            tipo_img = drop.get('tipo_imagem', 'gif')
+            tipo_texto = "GIF (acima)" if tipo_img == 'gif' else "Banner (embaixo)"
+            
+            embed_lista.add_field(
+                name=f"{drop['emoji_painel']} {drop['titulo_painel']} ({drop_id})",
+                value=f"**Opções ({len(drop['opcoes'])}):**\n{opcoes_text}\n🖼️ {tipo_texto}",
+                inline=False
+            )
+        
+        await interaction.response.send_message(embed=embed_lista, ephemeral=True)
+    
+    # Atribuir callbacks
+    btn_categoria.callback = categoria_callback
+    btn_pix.callback = pix_callback
+    btn_qrcode.callback = qrcode_callback
+    btn_criar_produto.callback = criar_produto_callback
+    btn_criar_drop.callback = criar_drop_callback
+    btn_editar_produto.callback = editar_produto_callback
+    btn_editar_drop.callback = editar_drop_callback
+    btn_enviar_painel.callback = enviar_painel_callback
+    btn_enviar_drop.callback = enviar_drop_callback
+    btn_listar_produtos.callback = listar_produtos_callback
+    btn_listar_drop.callback = listar_drop_callback
+    
+    # Criar view
+    view = View(timeout=None)
+    view.add_item(btn_categoria)
+    view.add_item(btn_pix)
+    view.add_item(btn_qrcode)
+    view.add_item(btn_criar_produto)
+    view.add_item(btn_criar_drop)
+    view.add_item(btn_editar_produto)
+    view.add_item(btn_editar_drop)
+    view.add_item(btn_enviar_painel)
+    view.add_item(btn_enviar_drop)
+    view.add_item(btn_listar_produtos)
+    view.add_item(btn_listar_drop)
+    
+    await ctx.send(embed=embed, view=view)
 
 # Comando de ajuda
 @bot.command(name='ajuda')
@@ -128,65 +532,12 @@ async def ajuda(ctx):
     )
     
     embed.add_field(
-        name=".ConfigCategoria",
-        value="Configure a categoria onde os carrinhos serão criados",
+        name=".setup",
+        value="🎯 **PAINEL PRINCIPAL** - Acesse todas as configurações em um só lugar!",
         inline=False
     )
-    embed.add_field(
-        name=".CriarProduto",
-        value="Crie um painel de produto com título, descrição, GIF e preço",
-        inline=False
-    )
-    embed.add_field(
-        name=".CriarProdutoDrop",
-        value="Crie um painel com dropdown de múltiplas opções de produtos",
-        inline=False
-    )
-    embed.add_field(
-        name=".EnviarPainel",
-        value="Envie um painel de produto para um canal específico",
-        inline=False
-    )
-    embed.add_field(
-        name=".EnviarPainelDrop",
-        value="Envie um painel dropdown para um canal específico",
-        inline=False
-    )
-    embed.add_field(
-        name=".EstoqueProduto",
-        value="Configure o estoque de produtos (normais e dropdown)",
-        inline=False
-    )
-    embed.add_field(
-        name=".LogsPrivado <#canal>",
-        value="Configure o canal de logs privadas",
-        inline=False
-    )
-    embed.add_field(
-        name=".ConfigFeedback <#canal>",
-        value="Configure o canal de feedback dos clientes",
-        inline=False
-    )
-    embed.add_field(
-        name=".ConfigPix",
-        value="Configure as informações do PIX",
-        inline=False
-    )
-    embed.add_field(
-        name=".FeedbackCliente",
-        value="Solicite feedback do cliente (use no carrinho)",
-        inline=False
-    )
-    embed.add_field(
-        name=".ListarProdutos",
-        value="Liste todos os produtos cadastrados",
-        inline=False
-    )
-    embed.add_field(
-        name=".ListarProdutosDrop",
-        value="Liste todos os produtos dropdown cadastrados",
-        inline=False
-    )
+    
+    embed.set_footer(text="Use .setup para gerenciar tudo facilmente!")
     
     await ctx.send(embed=embed)
 
@@ -208,7 +559,7 @@ async def config_categoria(ctx):
     
     options = [
         discord.SelectOption(label=cat.name, value=str(cat.id), description=f"ID: {cat.id}")
-        for cat in categorias[:25]  # Discord permite máximo 25 opções
+        for cat in categorias[:25]
     ]
     
     select = Select(placeholder="Escolha uma categoria...", options=options)
@@ -220,135 +571,6 @@ async def config_categoria(ctx):
             f"✅ Categoria configurada: <#{select.values[0]}>",
             ephemeral=True
         )
-    
-    select.callback = select_callback
-    view = View()
-    view.add_item(select)
-    
-    await ctx.send(embed=embed, view=view)
-
-# Modal para configurar estoque
-class ConfigEstoqueModal(Modal):
-    def __init__(self, produto_id, produto_nome):
-        super().__init__(title=f"Estoque - {produto_nome[:30]}")
-        self.produto_id = produto_id
-        
-        estoque_atual = get_estoque(produto_id)
-        
-        self.quantidade = TextInput(
-            label="Quantidade em Estoque",
-            placeholder="Digite a quantidade (ou deixe vazio para ilimitado)",
-            required=False,
-            max_length=10,
-            default=str(estoque_atual['quantidade']) if estoque_atual['quantidade'] > 0 else ""
-        )
-        
-        self.add_item(self.quantidade)
-    
-    async def on_submit(self, interaction: discord.Interaction):
-        if self.quantidade.value.strip() == "":
-            # Estoque ilimitado
-            set_estoque(self.produto_id, -1, ilimitado=True)
-            await interaction.response.send_message(
-                f"✅ Estoque configurado como **ILIMITADO** para o produto!",
-                ephemeral=True
-            )
-        else:
-            try:
-                qtd = int(self.quantidade.value)
-                if qtd < 0:
-                    await interaction.response.send_message(
-                        "❌ A quantidade não pode ser negativa!",
-                        ephemeral=True
-                    )
-                    return
-                
-                set_estoque(self.produto_id, qtd, ilimitado=False)
-                await interaction.response.send_message(
-                    f"✅ Estoque configurado: **{qtd} unidades**",
-                    ephemeral=True
-                )
-            except ValueError:
-                await interaction.response.send_message(
-                    "❌ Digite um número válido!",
-                    ephemeral=True
-                )
-
-# Comando para configurar estoque
-@bot.command(name='EstoqueProduto')
-@is_owner_or_admin()
-async def estoque_produto(ctx):
-    if not produtos and not produtos_drop:
-        await ctx.send("❌ Nenhum produto cadastrado ainda!")
-        return
-    
-    embed = discord.Embed(
-        title="📦 Configurar Estoque",
-        description="Selecione um produto para configurar o estoque:",
-        color=discord.Color.blue()
-    )
-    
-    # Criar opções combinando produtos normais e dropdown
-    options = []
-    
-    # Adicionar produtos normais
-    for prod_id, prod in produtos.items():
-        estoque_info = get_estoque(prod_id)
-        estoque_text = "♾️ Ilimitado" if estoque_info['ilimitado'] else f"📦 {estoque_info['quantidade']} un."
-        
-        options.append(
-            discord.SelectOption(
-                label=f"{prod['titulo'][:80]}",
-                value=prod_id,
-                description=f"R$ {prod['preco']} | {estoque_text}",
-                emoji="📦"
-            )
-        )
-    
-    # Adicionar produtos dropdown (cada opção individualmente)
-    for drop_id, drop in produtos_drop.items():
-        for i, opcao in enumerate(drop['opcoes']):
-            opcao_id = f"{drop_id}_opt_{i}"
-            estoque_info = get_estoque(opcao_id)
-            estoque_text = "♾️ Ilimitado" if estoque_info['ilimitado'] else f"📦 {estoque_info['quantidade']} un."
-            
-            options.append(
-                discord.SelectOption(
-                    label=f"{opcao['nome'][:80]}",
-                    value=opcao_id,
-                    description=f"R$ {opcao['preco']} | {estoque_text}",
-                    emoji=opcao['emoji']
-                )
-            )
-    
-    if not options:
-        await ctx.send("❌ Nenhum produto encontrado!")
-        return
-    
-    # Limitar a 25 opções (limite do Discord)
-    if len(options) > 25:
-        options = options[:25]
-        embed.set_footer(text="⚠️ Mostrando apenas os primeiros 25 produtos")
-    
-    select = Select(placeholder="Escolha um produto...", options=options)
-    
-    async def select_callback(interaction):
-        produto_id = select.values[0]
-        
-        # Encontrar o nome do produto
-        produto_nome = ""
-        if produto_id in produtos:
-            produto_nome = produtos[produto_id]['titulo']
-        else:
-            # É um produto dropdown
-            for drop_id, drop in produtos_drop.items():
-                if produto_id.startswith(drop_id):
-                    opcao_index = int(produto_id.split('_opt_')[1])
-                    produto_nome = f"{drop['titulo_painel']} - {drop['opcoes'][opcao_index]['nome']}"
-                    break
-        
-        modal = ConfigEstoqueModal(produto_id, produto_nome)
-        await interaction.response.send_modal(modal)
     
     select.callback = select_callback
     view = View()
@@ -380,8 +602,8 @@ class CriarProdutoModal(Modal):
             max_length=10
         )
         
-        self.gif_url = TextInput(
-            label="URL do GIF/Imagem",
+        self.imagem_url = TextInput(
+            label="URL da Imagem (GIF ou Banner)",
             placeholder="https://...",
             required=False,
             max_length=500
@@ -390,31 +612,166 @@ class CriarProdutoModal(Modal):
         self.add_item(self.titulo)
         self.add_item(self.descricao)
         self.add_item(self.preco)
-        self.add_item(self.gif_url)
+        self.add_item(self.imagem_url)
     
     async def on_submit(self, interaction: discord.Interaction):
-        produto_id = f"prod_{len(produtos) + 1}"
+        button_gif = Button(label="🎬 GIF (acima)", style=discord.ButtonStyle.primary)
+        button_banner = Button(label="🖼️ Banner (embaixo)", style=discord.ButtonStyle.secondary)
         
-        produtos[produto_id] = {
-            'titulo': self.titulo.value,
-            'descricao': self.descricao.value,
-            'preco': self.preco.value,
-            'gif_url': self.gif_url.value if self.gif_url.value else None,
-            'criado_em': datetime.now().isoformat()
-        }
+        async def gif_callback(btn_interaction):
+            produto_id = f"prod_{len(produtos) + 1}"
+            
+            produtos[produto_id] = {
+                'titulo': self.titulo.value,
+                'descricao': self.descricao.value,
+                'preco': self.preco.value,
+                'imagem_url': self.imagem_url.value if self.imagem_url.value else None,
+                'tipo_imagem': 'gif',
+                'criado_em': datetime.now().isoformat()
+            }
+            
+            save_produtos(produtos)
+            
+            embed = discord.Embed(
+                title="✅ Produto Criado com Sucesso!",
+                description=f"**ID:** {produto_id}\n**Título:** {self.titulo.value}\n**Tipo:** GIF (acima)",
+                color=discord.Color.green()
+            )
+            
+            await btn_interaction.response.send_message(embed=embed, ephemeral=True)
         
-        save_produtos(produtos)
+        async def banner_callback(btn_interaction):
+            produto_id = f"prod_{len(produtos) + 1}"
+            
+            produtos[produto_id] = {
+                'titulo': self.titulo.value,
+                'descricao': self.descricao.value,
+                'preco': self.preco.value,
+                'imagem_url': self.imagem_url.value if self.imagem_url.value else None,
+                'tipo_imagem': 'banner',
+                'criado_em': datetime.now().isoformat()
+            }
+            
+            save_produtos(produtos)
+            
+            embed = discord.Embed(
+                title="✅ Produto Criado com Sucesso!",
+                description=f"**ID:** {produto_id}\n**Título:** {self.titulo.value}\n**Tipo:** Banner (embaixo)",
+                color=discord.Color.green()
+            )
+            
+            await btn_interaction.response.send_message(embed=embed, ephemeral=True)
         
-        # Configurar estoque como ilimitado por padrão
-        set_estoque(produto_id, -1, ilimitado=True)
+        button_gif.callback = gif_callback
+        button_banner.callback = banner_callback
+        
+        view = View()
+        view.add_item(button_gif)
+        view.add_item(button_banner)
         
         embed = discord.Embed(
-            title="✅ Produto Criado com Sucesso!",
-            description=f"**ID:** {produto_id}\n**Título:** {self.titulo.value}\n**Estoque:** Ilimitado (configure com .EstoqueProduto)",
-            color=discord.Color.green()
+            title="🖼️ Escolha o Tipo de Imagem",
+            description="**GIF (acima):** Imagem exibida acima do texto\n**Banner (embaixo):** Imagem grande exibida embaixo do texto",
+            color=discord.Color.blue()
         )
         
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# Modal para editar produto
+class EditarProdutoModal(Modal):
+    def __init__(self, produto_id, produto):
+        super().__init__(title=f"Editar Produto: {produto['titulo']}")
+        self.produto_id = produto_id
+        
+        self.titulo = TextInput(
+            label="Título do Produto",
+            placeholder="Ex: VIP Premium",
+            max_length=100,
+            default=produto['titulo']
+        )
+        
+        self.descricao = TextInput(
+            label="Descrição do Produto",
+            placeholder="Descreva o que o cliente receberá...",
+            style=discord.TextStyle.paragraph,
+            max_length=1000,
+            default=produto['descricao']
+        )
+        
+        self.preco = TextInput(
+            label="Preço (R$)",
+            placeholder="Ex: 29.90",
+            max_length=10,
+            default=produto['preco']
+        )
+        
+        self.imagem_url = TextInput(
+            label="URL da Imagem (GIF ou Banner)",
+            placeholder="https://...",
+            required=False,
+            max_length=500,
+            default=produto.get('imagem_url', '')
+        )
+        
+        self.add_item(self.titulo)
+        self.add_item(self.descricao)
+        self.add_item(self.preco)
+        self.add_item(self.imagem_url)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        button_gif = Button(label="🎬 GIF (acima)", style=discord.ButtonStyle.primary)
+        button_banner = Button(label="🖼️ Banner (embaixo)", style=discord.ButtonStyle.secondary)
+        
+        async def gif_callback(btn_interaction):
+            produtos[self.produto_id]['titulo'] = self.titulo.value
+            produtos[self.produto_id]['descricao'] = self.descricao.value
+            produtos[self.produto_id]['preco'] = self.preco.value
+            produtos[self.produto_id]['imagem_url'] = self.imagem_url.value if self.imagem_url.value else None
+            produtos[self.produto_id]['tipo_imagem'] = 'gif'
+            produtos[self.produto_id]['editado_em'] = datetime.now().isoformat()
+            
+            save_produtos(produtos)
+            
+            embed = discord.Embed(
+                title="✅ Produto Atualizado!",
+                description=f"**ID:** {self.produto_id}\n**Título:** {self.titulo.value}\n**Tipo:** GIF (acima)",
+                color=discord.Color.green()
+            )
+            
+            await btn_interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        async def banner_callback(btn_interaction):
+            produtos[self.produto_id]['titulo'] = self.titulo.value
+            produtos[self.produto_id]['descricao'] = self.descricao.value
+            produtos[self.produto_id]['preco'] = self.preco.value
+            produtos[self.produto_id]['imagem_url'] = self.imagem_url.value if self.imagem_url.value else None
+            produtos[self.produto_id]['tipo_imagem'] = 'banner'
+            produtos[self.produto_id]['editado_em'] = datetime.now().isoformat()
+            
+            save_produtos(produtos)
+            
+            embed = discord.Embed(
+                title="✅ Produto Atualizado!",
+                description=f"**ID:** {self.produto_id}\n**Título:** {self.titulo.value}\n**Tipo:** Banner (embaixo)",
+                color=discord.Color.green()
+            )
+            
+            await btn_interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        button_gif.callback = gif_callback
+        button_banner.callback = banner_callback
+        
+        view = View()
+        view.add_item(button_gif)
+        view.add_item(button_banner)
+        
+        embed = discord.Embed(
+            title="🖼️ Escolha o Tipo de Imagem",
+            description="**GIF (acima):** Imagem exibida acima do texto\n**Banner (embaixo):** Imagem grande exibida embaixo do texto",
+            color=discord.Color.blue()
+        )
+        
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 # Modal para criar produto dropdown - Configuração inicial
 class CriarProdutoDropModal1(Modal):
@@ -441,8 +798,8 @@ class CriarProdutoDropModal1(Modal):
             max_length=10
         )
         
-        self.gif_url = TextInput(
-            label="URL do GIF/Imagem (opcional)",
+        self.imagem_url = TextInput(
+            label="URL da Imagem (GIF ou Banner)",
             placeholder="https://...",
             required=False,
             max_length=500
@@ -451,81 +808,253 @@ class CriarProdutoDropModal1(Modal):
         self.add_item(self.titulo_painel)
         self.add_item(self.descricao_painel)
         self.add_item(self.emoji_painel)
-        self.add_item(self.gif_url)
+        self.add_item(self.imagem_url)
     
     async def on_submit(self, interaction: discord.Interaction):
-        # Salvar temporariamente os dados
-        temp_id = f"temp_{interaction.user.id}"
+        button_gif = Button(label="🎬 GIF (acima)", style=discord.ButtonStyle.primary)
+        button_banner = Button(label="🖼️ Banner (embaixo)", style=discord.ButtonStyle.secondary)
         
-        if not hasattr(bot, 'temp_produtos_drop'):
-            bot.temp_produtos_drop = {}
+        async def gif_callback(btn_interaction):
+            temp_id = f"temp_{interaction.user.id}"
+            
+            if not hasattr(bot, 'temp_produtos_drop'):
+                bot.temp_produtos_drop = {}
+            
+            bot.temp_produtos_drop[temp_id] = {
+                'titulo_painel': self.titulo_painel.value,
+                'descricao_painel': self.descricao_painel.value,
+                'emoji_painel': self.emoji_painel.value if self.emoji_painel.value else '📦',
+                'imagem_url': self.imagem_url.value if self.imagem_url.value else None,
+                'tipo_imagem': 'gif',
+                'opcoes': []
+            }
+            
+            await btn_interaction.response.send_message(
+                "✅ Painel configurado (GIF)! Agora adicione as opções do dropdown:",
+                ephemeral=True
+            )
+            
+            button_add = Button(label="➕ Adicionar Opção", style=discord.ButtonStyle.success)
+            button_finish = Button(label="✅ Finalizar Painel", style=discord.ButtonStyle.primary)
+            
+            async def add_option_callback(btn_interaction2):
+                modal = CriarOpcaoDropModal(temp_id)
+                await btn_interaction2.response.send_modal(modal)
+            
+            async def finish_callback(btn_interaction2):
+                if len(bot.temp_produtos_drop[temp_id]['opcoes']) == 0:
+                    await btn_interaction2.response.send_message(
+                        "❌ Adicione pelo menos uma opção antes de finalizar!",
+                        ephemeral=True
+                    )
+                    return
+                
+                drop_id = f"drop_{len(produtos_drop) + 1}"
+                produtos_drop[drop_id] = bot.temp_produtos_drop[temp_id]
+                produtos_drop[drop_id]['criado_em'] = datetime.now().isoformat()
+                save_produtos_drop(produtos_drop)
+                
+                del bot.temp_produtos_drop[temp_id]
+                
+                embed = discord.Embed(
+                    title="✅ Painel Dropdown Criado!",
+                    description=f"**ID:** {drop_id}\n**Título:** {produtos_drop[drop_id]['titulo_painel']}\n**Opções:** {len(produtos_drop[drop_id]['opcoes'])}",
+                    color=discord.Color.green()
+                )
+                
+                await btn_interaction2.response.send_message(embed=embed, ephemeral=True)
+            
+            button_add.callback = add_option_callback
+            button_finish.callback = finish_callback
+            
+            view2 = View(timeout=300)
+            view2.add_item(button_add)
+            view2.add_item(button_finish)
+            
+            embed2 = discord.Embed(
+                title="➕ Adicionar Opções ao Dropdown",
+                description=f"**Painel:** {self.titulo_painel.value}\n\nClique em 'Adicionar Opção' para cada produto do dropdown.",
+                color=discord.Color.blue()
+            )
+            
+            await btn_interaction.followup.send(embed=embed2, view=view2, ephemeral=True)
         
-        bot.temp_produtos_drop[temp_id] = {
-            'titulo_painel': self.titulo_painel.value,
-            'descricao_painel': self.descricao_painel.value,
-            'emoji_painel': self.emoji_painel.value if self.emoji_painel.value else '📦',
-            'gif_url': self.gif_url.value if self.gif_url.value else None,
-            'opcoes': []
-        }
+        async def banner_callback(btn_interaction):
+            temp_id = f"temp_{interaction.user.id}"
+            
+            if not hasattr(bot, 'temp_produtos_drop'):
+                bot.temp_produtos_drop = {}
+            
+            bot.temp_produtos_drop[temp_id] = {
+                'titulo_painel': self.titulo_painel.value,
+                'descricao_painel': self.descricao_painel.value,
+                'emoji_painel': self.emoji_painel.value if self.emoji_painel.value else '📦',
+                'imagem_url': self.imagem_url.value if self.imagem_url.value else None,
+                'tipo_imagem': 'banner',
+                'opcoes': []
+            }
+            
+            await btn_interaction.response.send_message(
+                "✅ Painel configurado (Banner)! Agora adicione as opções do dropdown:",
+                ephemeral=True
+            )
+            
+            button_add = Button(label="➕ Adicionar Opção", style=discord.ButtonStyle.success)
+            button_finish = Button(label="✅ Finalizar Painel", style=discord.ButtonStyle.primary)
+            
+            async def add_option_callback(btn_interaction2):
+                modal = CriarOpcaoDropModal(temp_id)
+                await btn_interaction2.response.send_modal(modal)
+            
+            async def finish_callback(btn_interaction2):
+                if len(bot.temp_produtos_drop[temp_id]['opcoes']) == 0:
+                    await btn_interaction2.response.send_message(
+                        "❌ Adicione pelo menos uma opção antes de finalizar!",
+                        ephemeral=True
+                    )
+                    return
+                
+                drop_id = f"drop_{len(produtos_drop) + 1}"
+                produtos_drop[drop_id] = bot.temp_produtos_drop[temp_id]
+                produtos_drop[drop_id]['criado_em'] = datetime.now().isoformat()
+                save_produtos_drop(produtos_drop)
+                
+                del bot.temp_produtos_drop[temp_id]
+                
+                embed = discord.Embed(
+                    title="✅ Painel Dropdown Criado!",
+                    description=f"**ID:** {drop_id}\n**Título:** {produtos_drop[drop_id]['titulo_painel']}\n**Opções:** {len(produtos_drop[drop_id]['opcoes'])}",
+                    color=discord.Color.green()
+                )
+                
+                await btn_interaction2.response.send_message(embed=embed, ephemeral=True)
+            
+            button_add.callback = add_option_callback
+            button_finish.callback = finish_callback
+            
+            view2 = View(timeout=300)
+            view2.add_item(button_add)
+            view2.add_item(button_finish)
+            
+            embed2 = discord.Embed(
+                title="➕ Adicionar Opções ao Dropdown",
+                description=f"**Painel:** {self.titulo_painel.value}\n\nClique em 'Adicionar Opção' para cada produto do dropdown.",
+                color=discord.Color.blue()
+            )
+            
+            await btn_interaction.followup.send(embed=embed2, view=view2, ephemeral=True)
         
-        # Criar botão para adicionar opções
-        await interaction.response.send_message(
-            "✅ Painel configurado! Agora adicione as opções do dropdown:",
-            ephemeral=True
+        button_gif.callback = gif_callback
+        button_banner.callback = banner_callback
+        
+        view = View()
+        view.add_item(button_gif)
+        view.add_item(button_banner)
+        
+        embed = discord.Embed(
+            title="🖼️ Escolha o Tipo de Imagem",
+            description="**GIF (acima):** Imagem exibida acima do texto\n**Banner (embaixo):** Imagem grande exibida embaixo do texto",
+            color=discord.Color.blue()
         )
         
-        # Enviar mensagem com botão para adicionar opções
-        button_add = Button(label="➕ Adicionar Opção", style=discord.ButtonStyle.success)
-        button_finish = Button(label="✅ Finalizar Painel", style=discord.ButtonStyle.primary)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# Modal para editar produto dropdown - Configuração inicial
+class EditarProdutoDropModal1(Modal):
+    def __init__(self, drop_id, painel):
+        super().__init__(title=f"Editar Painel: {painel['titulo_painel']}")
+        self.drop_id = drop_id
         
-        async def add_option_callback(btn_interaction):
-            modal = CriarOpcaoDropModal(temp_id)
-            await btn_interaction.response.send_modal(modal)
+        self.titulo_painel = TextInput(
+            label="Título do Painel",
+            placeholder="Ex: Escolha seu pacote de SALAS",
+            max_length=100,
+            default=painel['titulo_painel']
+        )
         
-        async def finish_callback(btn_interaction):
-            if len(bot.temp_produtos_drop[temp_id]['opcoes']) == 0:
-                await btn_interaction.response.send_message(
-                    "❌ Adicione pelo menos uma opção antes de finalizar!",
-                    ephemeral=True
-                )
-                return
+        self.descricao_painel = TextInput(
+            label="Descrição do Painel",
+            placeholder="Selecione a quantidade de salas que deseja comprar",
+            style=discord.TextStyle.paragraph,
+            max_length=1000,
+            default=painel['descricao_painel']
+        )
+        
+        self.emoji_painel = TextInput(
+            label="Emoji do Painel (opcional)",
+            placeholder="Ex: 💎 ou 🎁",
+            required=False,
+            max_length=10,
+            default=painel.get('emoji_painel', '📦')
+        )
+        
+        self.imagem_url = TextInput(
+            label="URL da Imagem (GIF ou Banner)",
+            placeholder="https://...",
+            required=False,
+            max_length=500,
+            default=painel.get('imagem_url', '')
+        )
+        
+        self.add_item(self.titulo_painel)
+        self.add_item(self.descricao_painel)
+        self.add_item(self.emoji_painel)
+        self.add_item(self.imagem_url)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        button_gif = Button(label="🎬 GIF (acima)", style=discord.ButtonStyle.primary)
+        button_banner = Button(label="🖼️ Banner (embaixo)", style=discord.ButtonStyle.secondary)
+        
+        async def gif_callback(btn_interaction):
+            produtos_drop[self.drop_id]['titulo_painel'] = self.titulo_painel.value
+            produtos_drop[self.drop_id]['descricao_painel'] = self.descricao_painel.value
+            produtos_drop[self.drop_id]['emoji_painel'] = self.emoji_painel.value if self.emoji_painel.value else '📦'
+            produtos_drop[self.drop_id]['imagem_url'] = self.imagem_url.value if self.imagem_url.value else None
+            produtos_drop[self.drop_id]['tipo_imagem'] = 'gif'
+            produtos_drop[self.drop_id]['editado_em'] = datetime.now().isoformat()
             
-            # Salvar produto dropdown
-            drop_id = f"drop_{len(produtos_drop) + 1}"
-            produtos_drop[drop_id] = bot.temp_produtos_drop[temp_id]
-            produtos_drop[drop_id]['criado_em'] = datetime.now().isoformat()
             save_produtos_drop(produtos_drop)
             
-            # Configurar estoque ilimitado para cada opção
-            for i in range(len(produtos_drop[drop_id]['opcoes'])):
-                opcao_id = f"{drop_id}_opt_{i}"
-                set_estoque(opcao_id, -1, ilimitado=True)
-            
-            # Limpar dados temporários
-            del bot.temp_produtos_drop[temp_id]
-            
             embed = discord.Embed(
-                title="✅ Painel Dropdown Criado!",
-                description=f"**ID:** {drop_id}\n**Título:** {produtos_drop[drop_id]['titulo_painel']}\n**Opções:** {len(produtos_drop[drop_id]['opcoes'])}\n**Estoque:** Ilimitado para todas (configure com .EstoqueProduto)",
+                title="✅ Painel Atualizado!",
+                description=f"**ID:** {self.drop_id}\n**Título:** {self.titulo_painel.value}\n**Tipo:** GIF (acima)",
                 color=discord.Color.green()
             )
             
             await btn_interaction.response.send_message(embed=embed, ephemeral=True)
         
-        button_add.callback = add_option_callback
-        button_finish.callback = finish_callback
+        async def banner_callback(btn_interaction):
+            produtos_drop[self.drop_id]['titulo_painel'] = self.titulo_painel.value
+            produtos_drop[self.drop_id]['descricao_painel'] = self.descricao_painel.value
+            produtos_drop[self.drop_id]['emoji_painel'] = self.emoji_painel.value if self.emoji_painel.value else '📦'
+            produtos_drop[self.drop_id]['imagem_url'] = self.imagem_url.value if self.imagem_url.value else None
+            produtos_drop[self.drop_id]['tipo_imagem'] = 'banner'
+            produtos_drop[self.drop_id]['editado_em'] = datetime.now().isoformat()
+            
+            save_produtos_drop(produtos_drop)
+            
+            embed = discord.Embed(
+                title="✅ Painel Atualizado!",
+                description=f"**ID:** {self.drop_id}\n**Título:** {self.titulo_painel.value}\n**Tipo:** Banner (embaixo)",
+                color=discord.Color.green()
+            )
+            
+            await btn_interaction.response.send_message(embed=embed, ephemeral=True)
         
-        view = View(timeout=300)
-        view.add_item(button_add)
-        view.add_item(button_finish)
+        button_gif.callback = gif_callback
+        button_banner.callback = banner_callback
+        
+        view = View()
+        view.add_item(button_gif)
+        view.add_item(button_banner)
         
         embed = discord.Embed(
-            title="➕ Adicionar Opções ao Dropdown",
-            description=f"**Painel:** {self.titulo_painel.value}\n\nClique em 'Adicionar Opção' para cada produto do dropdown.",
+            title="🖼️ Escolha o Tipo de Imagem",
+            description="**GIF (acima):** Imagem exibida acima do texto\n**Banner (embaixo):** Imagem grande exibida embaixo do texto",
             color=discord.Color.blue()
         )
         
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 # Modal para adicionar opção ao dropdown
 class CriarOpcaoDropModal(Modal):
@@ -591,304 +1120,14 @@ class CriarOpcaoDropModal(Modal):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# Comando para criar produto
-@bot.command(name='CriarProduto')
-@is_owner_or_admin()
-async def criar_produto(ctx):
-    modal = CriarProdutoModal()
-    await ctx.send("✨ Abrindo formulário para criar produto...", delete_after=3)
-    
-    button = Button(label="Criar Produto", style=discord.ButtonStyle.green, emoji="➕")
-    
-    async def button_callback(interaction):
-        await interaction.response.send_modal(modal)
-    
-    button.callback = button_callback
-    view = View()
-    view.add_item(button)
-    
-    embed = discord.Embed(
-        title="➕ Criar Novo Produto",
-        description="Clique no botão abaixo para abrir o formulário",
-        color=discord.Color.blue()
-    )
-    
-    await ctx.send(embed=embed, view=view)
-
-# Comando para criar produto dropdown
-@bot.command(name='CriarProdutoDrop')
-@is_owner_or_admin()
-async def criar_produto_drop(ctx):
-    modal = CriarProdutoDropModal1()
-    
-    button = Button(label="Criar Painel Dropdown", style=discord.ButtonStyle.green, emoji="📋")
-    
-    async def button_callback(interaction):
-        await interaction.response.send_modal(modal)
-    
-    button.callback = button_callback
-    view = View()
-    view.add_item(button)
-    
-    embed = discord.Embed(
-        title="📋 Criar Painel Dropdown",
-        description="Clique no botão abaixo para criar um painel com múltiplas opções de produtos",
-        color=discord.Color.blue()
-    )
-    
-    await ctx.send(embed=embed, view=view)
-
-# Comando para listar produtos
-@bot.command(name='ListarProdutos')
-@is_owner_or_admin()
-async def listar_produtos(ctx):
-    if not produtos:
-        await ctx.send("❌ Nenhum produto cadastrado ainda!")
-        return
-    
-    embed = discord.Embed(
-        title="📦 Produtos Cadastrados",
-        color=discord.Color.blue()
-    )
-    
-    for prod_id, prod in produtos.items():
-        estoque_info = get_estoque(prod_id)
-        estoque_text = "♾️ Ilimitado" if estoque_info['ilimitado'] else f"📦 Estoque: {estoque_info['quantidade']} un."
-        
-        embed.add_field(
-            name=f"{prod['titulo']} ({prod_id})",
-            value=f"💰 R$ {prod['preco']}\n{estoque_text}\n📝 {prod['descricao'][:50]}...",
-            inline=False
-        )
-    
-    await ctx.send(embed=embed)
-
-# Comando para listar produtos dropdown
-@bot.command(name='ListarProdutosDrop')
-@is_owner_or_admin()
-async def listar_produtos_drop(ctx):
-    if not produtos_drop:
-        await ctx.send("❌ Nenhum produto dropdown cadastrado ainda!")
-        return
-    
-    embed = discord.Embed(
-        title="📋 Painéis Dropdown Cadastrados",
-        color=discord.Color.blue()
-    )
-    
-    for drop_id, drop in produtos_drop.items():
-        opcoes_text = ""
-        for i, op in enumerate(drop['opcoes'][:3]):
-            opcao_id = f"{drop_id}_opt_{i}"
-            estoque_info = get_estoque(opcao_id)
-            estoque_text = "♾️" if estoque_info['ilimitado'] else f"({estoque_info['quantidade']})"
-            opcoes_text += f"• {op['nome']} - R$ {op['preco']} {estoque_text}\n"
-        
-        if len(drop['opcoes']) > 3:
-            opcoes_text += f"... e mais {len(drop['opcoes']) - 3} opções"
-        
-        embed.add_field(
-            name=f"{drop['emoji_painel']} {drop['titulo_painel']} ({drop_id})",
-            value=f"**Opções ({len(drop['opcoes'])}):**\n{opcoes_text}",
-            inline=False
-        )
-    
-    await ctx.send(embed=embed)
-
-# Comando para enviar painel
-@bot.command(name='EnviarPainel')
-@is_owner_or_admin()
-async def enviar_painel(ctx):
-    if not produtos:
-        await ctx.send("❌ Nenhum produto cadastrado! Use .CriarProduto primeiro.")
-        return
-    
-    options = [
-        discord.SelectOption(
-            label=prod['titulo'],
-            value=prod_id,
-            description=f"R$ {prod['preco']}"
-        )
-        for prod_id, prod in produtos.items()
-    ]
-    
-    select = Select(placeholder="Escolha o produto...", options=options[:25])
-    
-    async def select_callback(interaction):
-        prod_id = select.values[0]
-        produto = produtos[prod_id]
-        estoque_info = get_estoque(prod_id)
-        
-        # Criar embed do produto
-        embed = discord.Embed(
-            title=produto['titulo'],
-            description=produto['descricao'],
-            color=discord.Color.gold()
-        )
-        embed.add_field(name="💰 Preço", value=f"R$ {produto['preco']}", inline=True)
-        
-        # Adicionar informação de estoque
-        if estoque_info['ilimitado']:
-            embed.add_field(name="📦 Estoque", value="♾️ Ilimitado", inline=True)
-        else:
-            embed.add_field(name="📦 Estoque", value=f"{estoque_info['quantidade']} unidades", inline=True)
-        
-        if produto['gif_url']:
-            embed.set_image(url=produto['gif_url'])
-        
-        embed.set_footer(text="Clique em 'Comprar' para iniciar sua compra!")
-        
-        # Botão de comprar (desabilitar se sem estoque)
-        sem_estoque = not estoque_info['ilimitado'] and estoque_info['quantidade'] <= 0
-        button = Button(
-            label="🛒 Comprar" if not sem_estoque else "❌ Sem Estoque",
-            style=discord.ButtonStyle.success if not sem_estoque else discord.ButtonStyle.danger,
-            disabled=sem_estoque
-        )
-        
-        async def comprar_callback(button_interaction):
-            # Verificar estoque novamente antes de criar carrinho
-            estoque_atual = get_estoque(prod_id)
-            if not estoque_atual['ilimitado'] and estoque_atual['quantidade'] <= 0:
-                await button_interaction.response.send_message(
-                    "❌ Produto sem estoque no momento!",
-                    ephemeral=True
-                )
-                return
-            
-            await criar_carrinho(button_interaction, produto, prod_id)
-        
-        button.callback = comprar_callback
-        view = View(timeout=None)
-        view.add_item(button)
-        
-        await interaction.channel.send(embed=embed, view=view)
-        await interaction.response.send_message("✅ Painel enviado!", ephemeral=True)
-    
-    select.callback = select_callback
-    view = View()
-    view.add_item(select)
-    
-    embed = discord.Embed(
-        title="📤 Enviar Painel de Produto",
-        description="Selecione o produto que deseja enviar para este canal:",
-        color=discord.Color.blue()
-    )
-    
-    await ctx.send(embed=embed, view=view)
-
-# Comando para enviar painel dropdown
-@bot.command(name='EnviarPainelDrop')
-@is_owner_or_admin()
-async def enviar_painel_drop(ctx):
-    if not produtos_drop:
-        await ctx.send("❌ Nenhum painel dropdown cadastrado! Use .CriarProdutoDrop primeiro.")
-        return
-    
-    options = [
-        discord.SelectOption(
-            label=drop['titulo_painel'],
-            value=drop_id,
-            description=f"{len(drop['opcoes'])} opções disponíveis",
-            emoji=drop['emoji_painel']
-        )
-        for drop_id, drop in produtos_drop.items()
-    ]
-    
-    select = Select(placeholder="Escolha o painel dropdown...", options=options[:25])
-    
-    async def select_callback(interaction):
-        drop_id = select.values[0]
-        painel = produtos_drop[drop_id]
-        
-        # Criar embed do painel
-        embed = discord.Embed(
-            title=f"{painel['emoji_painel']} {painel['titulo_painel']}",
-            description=painel['descricao_painel'],
-            color=discord.Color.gold()
-        )
-        
-        if painel['gif_url']:
-            embed.set_image(url=painel['gif_url'])
-        
-        embed.set_footer(text="Selecione uma opção no menu abaixo para comprar!")
-        
-        # Criar select menu com as opções
-        opcoes_select = []
-        for i, opcao in enumerate(painel['opcoes'][:25]):  # Máximo 25 opções
-            opcao_id = f"{drop_id}_opt_{i}"
-            estoque_info = get_estoque(opcao_id)
-            
-            # Adicionar estoque na descrição
-            estoque_text = "♾️ Ilimitado" if estoque_info['ilimitado'] else f"📦 Estoque: {estoque_info['quantidade']}"
-            descricao = f"{opcao['descricao']} | {estoque_text}"
-            
-            opcoes_select.append(
-                discord.SelectOption(
-                    label=opcao['nome'],
-                    value=str(i),
-                    description=descricao[:100],  # Limite de caracteres
-                    emoji=opcao['emoji']
-                )
-            )
-        
-        produto_select = Select(
-            placeholder="Selecione a quantidade de salas",
-            options=opcoes_select
-        )
-        
-        async def produto_select_callback(select_interaction):
-            opcao_index = int(produto_select.values[0])
-            opcao_selecionada = painel['opcoes'][opcao_index]
-            opcao_id = f"{drop_id}_opt_{opcao_index}"
-            
-            # Verificar estoque
-            estoque_info = get_estoque(opcao_id)
-            if not estoque_info['ilimitado'] and estoque_info['quantidade'] <= 0:
-                await select_interaction.response.send_message(
-                    "❌ Esta opção está sem estoque no momento!",
-                    ephemeral=True
-                )
-                return
-            
-            # Criar "produto" temporário para o carrinho
-            produto_temp = {
-                'titulo': f"{painel['titulo_painel']} - {opcao_selecionada['nome']}",
-                'descricao': f"{painel['descricao_painel']}\n\n**Opção selecionada:** {opcao_selecionada['nome']}",
-                'preco': opcao_selecionada['preco'],
-                'gif_url': painel['gif_url']
-            }
-            
-            await criar_carrinho(select_interaction, produto_temp, opcao_id)
-        
-        produto_select.callback = produto_select_callback
-        view = View(timeout=None)
-        view.add_item(produto_select)
-        
-        await interaction.channel.send(embed=embed, view=view)
-        await interaction.response.send_message("✅ Painel dropdown enviado!", ephemeral=True)
-    
-    select.callback = select_callback
-    view = View()
-    view.add_item(select)
-    
-    embed = discord.Embed(
-        title="📤 Enviar Painel Dropdown",
-        description="Selecione o painel dropdown que deseja enviar para este canal:",
-        color=discord.Color.blue()
-    )
-    
-    await ctx.send(embed=embed, view=view)
-
 # Função para criar carrinho
 async def criar_carrinho(interaction, produto, prod_id):
     guild = interaction.guild
     user = interaction.user
     
-    # Verificar se categoria está configurada
     if not config.get('categoria_id'):
         await interaction.response.send_message(
-            "❌ Categoria não configurada! Peça ao administrador para usar .ConfigCategoria",
+            "❌ Categoria não configurada! Peça ao administrador para usar .setup",
             ephemeral=True
         )
         return
@@ -902,7 +1141,6 @@ async def criar_carrinho(interaction, produto, prod_id):
         )
         return
     
-    # Contador de carrinhos
     if str(guild.id) not in config['contador_carrinhos']:
         config['contador_carrinhos'][str(guild.id)] = 0
     
@@ -910,7 +1148,6 @@ async def criar_carrinho(interaction, produto, prod_id):
     config['contador_carrinhos'][str(guild.id)] += 1
     save_config(config)
     
-    # Criar canal do carrinho
     overwrites = {
         guild.default_role: discord.PermissionOverwrite(read_messages=False),
         user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
@@ -920,35 +1157,29 @@ async def criar_carrinho(interaction, produto, prod_id):
     nome_canal = f"🚀{user.name}-{numero}"
     canal = await categoria.create_text_channel(name=nome_canal, overwrites=overwrites)
     
-    # Obter estoque atual
-    estoque_info = get_estoque(prod_id)
-    estoque_text = "♾️ Ilimitado" if estoque_info['ilimitado'] else f"📦 {estoque_info['quantidade']} unidades disponíveis"
-    
-    # Embed do carrinho
-    embed = discord.Embed(
+    embed_carrinho = discord.Embed(
         title=f"🛒 Carrinho de Compra - {produto['titulo']}",
         description=produto['descricao'],
         color=discord.Color.blue()
     )
     
-    embed.add_field(name="💰 Valor", value=f"R$ {produto['preco']}", inline=True)
-    embed.add_field(name="👤 Cliente", value=user.mention, inline=True)
-    embed.add_field(name="📦 Estoque", value=estoque_text, inline=True)
+    embed_carrinho.add_field(name="💰 Valor", value=f"R$ {produto['preco']}", inline=True)
+    embed_carrinho.add_field(name="👤 Cliente", value=user.mention, inline=True)
     
-    embed.add_field(
-        name="\n📱 Informações de Pagamento - PIX",
-        value=config.get('pix_info', 'Configure o PIX com .ConfigPix'),
-        inline=False
-    )
+    tipo_imagem = produto.get('tipo_imagem', 'gif')
     
-    if produto['gif_url']:
-        embed.set_image(url=produto['gif_url'])
+    if produto.get('imagem_url'):
+        if tipo_imagem == 'gif':
+            embed_carrinho.set_image(url=produto['imagem_url'])
+        else:
+            embed_carrinho.set_image(url=produto['imagem_url'])
     
-    embed.set_footer(text="Envie o comprovante de pagamento neste canal")
+    embed_carrinho.set_footer(text="Use os botões abaixo para gerenciar o pagamento")
     
-    # Botões do carrinho
     aprovar_btn = Button(label="✅ Aprovar Pagamento", style=discord.ButtonStyle.success)
     fechar_btn = Button(label="🔒 Fechar", style=discord.ButtonStyle.danger)
+    qrcode_btn = Button(label="📱 QR Code", style=discord.ButtonStyle.primary)
+    pix_btn = Button(label="💳 PIX", style=discord.ButtonStyle.secondary)
     
     async def aprovar_callback(btn_interaction):
         if btn_interaction.user.id != guild.owner_id and not btn_interaction.user.guild_permissions.administrator:
@@ -958,45 +1189,14 @@ async def criar_carrinho(interaction, produto, prod_id):
             )
             return
         
-        # Diminuir estoque
-        estoque_antes = get_estoque(prod_id)
-        diminuir_estoque(prod_id)
-        estoque_depois = get_estoque(prod_id)
-        
-        estoque_msg = ""
-        if not estoque_antes['ilimitado']:
-            estoque_msg = f"\n📦 Estoque atualizado: {estoque_antes['quantidade']} → {estoque_depois['quantidade']}"
-        
         await btn_interaction.response.send_message(
-            f"✅ Pagamento aprovado! {user.mention}, obrigado pela compra! 🎉{estoque_msg}"
+            f"✅ Pagamento aprovado! {user.mention}, obrigado pela compra! 🎉"
         )
-        
-        # Log do estoque
-        if config.get('logs_privado_id'):
-            log_channel = guild.get_channel(config['logs_privado_id'])
-            if log_channel:
-                log_embed = discord.Embed(
-                    title="✅ Pagamento Aprovado",
-                    color=discord.Color.green(),
-                    timestamp=datetime.now()
-                )
-                log_embed.add_field(name="👤 Cliente", value=f"{user.mention}", inline=True)
-                log_embed.add_field(name="📦 Produto", value=produto['titulo'], inline=True)
-                log_embed.add_field(name="💰 Valor", value=f"R$ {produto['preco']}", inline=True)
-                
-                if not estoque_depois['ilimitado']:
-                    log_embed.add_field(
-                        name="📊 Estoque",
-                        value=f"{estoque_antes['quantidade']} → {estoque_depois['quantidade']}",
-                        inline=True
-                    )
-                
-                await log_channel.send(embed=log_embed)
     
     async def fechar_callback(btn_interaction):
-        if btn_interaction.user.id != guild.owner_id and not btn_interaction.user.guild_permissions.administrator and btn_interaction.user.id != user.id:
+        if btn_interaction.user.id != guild.owner_id and not btn_interaction.user.guild_permissions.administrator:
             await btn_interaction.response.send_message(
-                "❌ Você não tem permissão para fechar este carrinho!",
+                "❌ Apenas o dono ou administradores podem fechar o carrinho!",
                 ephemeral=True
             )
             return
@@ -1005,65 +1205,46 @@ async def criar_carrinho(interaction, produto, prod_id):
         await asyncio.sleep(5)
         await canal.delete()
     
+    async def qrcode_callback(btn_interaction):
+        if config.get('qrcode_url'):
+            embed_qr = discord.Embed(
+                title="📱 QR Code PIX",
+                description="Escaneie o QR Code abaixo para realizar o pagamento:",
+                color=discord.Color.green()
+            )
+            embed_qr.set_image(url=config['qrcode_url'])
+            embed_qr.add_field(name="💰 Valor", value=f"R$ {produto['preco']}", inline=True)
+            await btn_interaction.response.send_message(embed=embed_qr, ephemeral=True)
+        else:
+            await btn_interaction.response.send_message(
+                "❌ QR Code não configurado! Peça ao administrador para usar .setup",
+                ephemeral=True
+            )
+    
+    async def pix_callback(btn_interaction):
+        embed_pix = discord.Embed(
+            title="💳 Informações PIX",
+            description=config.get('pix_info', 'Configure o PIX com .setup'),
+            color=discord.Color.gold()
+        )
+        embed_pix.add_field(name="💰 Valor a Pagar", value=f"R$ {produto['preco']}", inline=False)
+        embed_pix.set_footer(text="Após realizar o pagamento, envie o comprovante neste canal")
+        await btn_interaction.response.send_message(embed=embed_pix, ephemeral=True)
+    
     aprovar_btn.callback = aprovar_callback
     fechar_btn.callback = fechar_callback
+    qrcode_btn.callback = qrcode_callback
+    pix_btn.callback = pix_callback
     
     view = View(timeout=None)
+    view.add_item(qrcode_btn)
+    view.add_item(pix_btn)
     view.add_item(aprovar_btn)
     view.add_item(fechar_btn)
     
-    await canal.send(f"{user.mention}", embed=embed, view=view)
+    await canal.send(f"{user.mention}", embed=embed_carrinho, view=view)
     
-    # Log privado
-    if config.get('logs_privado_id'):
-        log_channel = guild.get_channel(config['logs_privado_id'])
-        if log_channel:
-            log_embed = discord.Embed(
-                title="🛒 Novo Carrinho Aberto",
-                color=discord.Color.blue(),
-                timestamp=datetime.now()
-            )
-            log_embed.add_field(name="👤 Cliente", value=f"{user.mention} ({user.id})", inline=True)
-            log_embed.add_field(name="📦 Produto", value=produto['titulo'], inline=True)
-            log_embed.add_field(name="💰 Valor", value=f"R$ {produto['preco']}", inline=True)
-            log_embed.add_field(name="📝 Canal", value=canal.mention, inline=True)
-            
-            await log_channel.send(embed=log_embed)
-    
-    await interaction.response.send_message(
-        f"✅ Carrinho criado! Acesse {canal.mention}",
-        ephemeral=True
-    )
-
-# Comando para configurar logs privado
-@bot.command(name='LogsPrivado')
-@is_owner_or_admin()
-async def logs_privado(ctx, canal: discord.TextChannel):
-    config['logs_privado_id'] = canal.id
-    save_config(config)
-    
-    embed = discord.Embed(
-        title="✅ Logs Privado Configurado",
-        description=f"Canal de logs: {canal.mention}",
-        color=discord.Color.green()
-    )
-    
-    await ctx.send(embed=embed)
-
-# Comando para configurar feedback
-@bot.command(name='ConfigFeedback')
-@is_owner_or_admin()
-async def config_feedback(ctx, canal: discord.TextChannel):
-    config['feedback_channel_id'] = canal.id
-    save_config(config)
-    
-    embed = discord.Embed(
-        title="✅ Canal de Feedback Configurado",
-        description=f"Canal de feedback: {canal.mention}",
-        color=discord.Color.green()
-    )
-    
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(f"✅ Carrinho criado! Acesse {canal.mention}", ephemeral=True)
 
 # Comando para configurar PIX
 @bot.command(name='ConfigPix')
@@ -1105,108 +1286,40 @@ async def config_pix(ctx):
     
     await ctx.send("💳 Clique no botão para configurar o PIX:", view=view)
 
-# Comando para solicitar feedback
-@bot.command(name='FeedbackCliente')
+# Comando para configurar QR Code
+@bot.command(name='ConfigQRCode')
 @is_owner_or_admin()
-async def feedback_cliente(ctx):
-    # Verificar se está em um canal de carrinho
-    if not ctx.channel.name.startswith('🚀'):
-        await ctx.send("❌ Este comando só pode ser usado em canais de carrinho!")
-        return
+async def config_qrcode(ctx):
+    await ctx.send("📱 Envie a imagem do QR Code PIX:")
     
-    if not config.get('feedback_channel_id'):
-        await ctx.send("❌ Canal de feedback não configurado! Use .ConfigFeedback")
-        return
+    def check(m):
+        return m.author == ctx.author and m.channel == ctx.channel and len(m.attachments) > 0
     
-    # Encontrar o cliente
-    cliente = None
-    for member in ctx.channel.members:
-        if member.id != ctx.guild.me.id and member.id != ctx.guild.owner_id:
-            cliente = member
-            break
-    
-    if not cliente:
-        await ctx.send("❌ Cliente não encontrado no canal!")
-        return
-    
-    embed = discord.Embed(
-        title="⭐ Avaliação de Atendimento",
-        description=f"{cliente.mention}, como foi sua experiência?\n\nPor favor, avalie nosso atendimento e produto!",
-        color=discord.Color.gold()
-    )
-    
-    # Criar seletor de estrelas
-    options = [
-        discord.SelectOption(label="⭐⭐⭐⭐⭐ (5 estrelas)", value="5", emoji="⭐"),
-        discord.SelectOption(label="⭐⭐⭐⭐ (4 estrelas)", value="4", emoji="⭐"),
-        discord.SelectOption(label="⭐⭐⭐ (3 estrelas)", value="3", emoji="⭐"),
-        discord.SelectOption(label="⭐⭐ (2 estrelas)", value="2", emoji="⭐"),
-        discord.SelectOption(label="⭐ (1 estrela)", value="1", emoji="⭐"),
-    ]
-    
-    select = Select(placeholder="Selecione a quantidade de estrelas...", options=options)
-    
-    feedback_text = None
-    
-    async def select_callback(interaction):
-        nonlocal feedback_text
+    try:
+        msg = await bot.wait_for('message', timeout=60.0, check=check)
         
-        # Modal para comentário
-        modal = Modal(title="Deixe seu Comentário")
-        
-        comentario = TextInput(
-            label="O que achou do atendimento/produto?",
-            placeholder="Deixe seu comentário aqui...",
-            style=discord.TextStyle.paragraph,
-            max_length=1000,
-            required=False
-        )
-        
-        modal.add_item(comentario)
-        
-        async def modal_submit(modal_interaction):
-            estrelas = int(select.values[0])
-            estrelas_visual = "⭐" * estrelas
+        if msg.attachments:
+            attachment = msg.attachments[0]
             
-            # Enviar feedback para o canal configurado
-            feedback_channel = ctx.guild.get_channel(config['feedback_channel_id'])
-            
-            if feedback_channel:
-                feedback_embed = discord.Embed(
-                    title="⭐ Novo Feedback Recebido",
-                    color=discord.Color.gold(),
-                    timestamp=datetime.now()
+            if attachment.content_type and attachment.content_type.startswith('image/'):
+                config['qrcode_url'] = attachment.url
+                save_config(config)
+                
+                embed = discord.Embed(
+                    title="✅ QR Code Configurado",
+                    description="QR Code do PIX configurado com sucesso!",
+                    color=discord.Color.green()
                 )
+                embed.set_image(url=attachment.url)
                 
-                feedback_embed.add_field(name="👤 Cliente", value=cliente.mention, inline=True)
-                feedback_embed.add_field(name="⭐ Avaliação", value=estrelas_visual, inline=True)
-                feedback_embed.add_field(name="📊 Nota", value=f"{estrelas}/5", inline=True)
-                
-                if comentario.value:
-                    feedback_embed.add_field(
-                        name="💬 Comentário",
-                        value=comentario.value,
-                        inline=False
-                    )
-                
-                feedback_embed.set_footer(text=f"Canal: {ctx.channel.name}")
-                
-                await feedback_channel.send(embed=feedback_embed)
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("❌ O arquivo enviado não é uma imagem válida!")
+        else:
+            await ctx.send("❌ Nenhuma imagem foi anexada!")
             
-            # Confirmar para o cliente
-            await modal_interaction.response.send_message(
-                f"✅ Obrigado pelo seu feedback, {cliente.mention}! 🎉",
-                ephemeral=False
-            )
-        
-        modal.on_submit = modal_submit
-        await interaction.response.send_modal(modal)
-    
-    select.callback = select_callback
-    view = View()
-    view.add_item(select)
-    
-    await ctx.send(embed=embed, view=view)
+    except asyncio.TimeoutError:
+        await ctx.send("❌ Tempo esgotado! Use o comando novamente.")
 
 # Tratar menções no canal de carrinho
 @bot.event
@@ -1214,15 +1327,13 @@ async def on_message(message):
     if message.author.bot:
         return
     
-    # Se for upload de imagem em canal de carrinho
     if message.channel.name.startswith('🚀') and message.attachments:
-        # Mencionar o dono e administradores
         owner = message.guild.owner
         admins = [m for m in message.guild.members if m.guild_permissions.administrator and not m.bot]
         
         mentions = f"{owner.mention}"
         if admins and len(admins) > 0:
-            mentions += " " + " ".join([m.mention for m in admins[:3]])  # Máximo 3 admins
+            mentions += " " + " ".join([m.mention for m in admins[:3]])
         
         await message.channel.send(
             f"📸 {mentions}, comprovante enviado por {message.author.mention}!"
