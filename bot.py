@@ -27,7 +27,6 @@ def load_config():
     return {
         'categoria_id': None,
         'pix_info': 'Configure seu PIX com o comando .ConfigPix',
-        'qrcode_url': None,
         'contador_carrinhos': {}
     }
 
@@ -62,7 +61,17 @@ produtos_drop = load_produtos_drop()
 # Verificar se é dono do servidor ou administrador
 def is_owner_or_admin():
     async def predicate(ctx):
-        return ctx.author.id == ctx.guild.owner_id or ctx.author.guild_permissions.administrator
+        # Verifica se é o dono do servidor
+        if ctx.author.id == ctx.guild.owner_id:
+            return True
+        
+        # Verifica se tem permissão de administrador
+        if ctx.author.guild_permissions.administrator:
+            return True
+        
+        # Se não for nenhum dos dois, retorna False
+        return False
+    
     return commands.check(predicate)
 
 # Verificar se é dono do servidor
@@ -81,6 +90,22 @@ async def on_ready():
         name="vendas | .setup"
     ))
 
+# Event handler para erros de permissão
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        embed = discord.Embed(
+            title="❌ Acesso Negado",
+            description="Você precisa ser **Administrador** ou **Dono do Servidor** para usar este comando!",
+            color=discord.Color.red()
+        )
+        embed.set_footer(text="Apenas membros autorizados podem gerenciar o bot")
+        await ctx.send(embed=embed, delete_after=10)
+    elif isinstance(error, commands.CommandNotFound):
+        pass  # Ignora comandos não encontrados
+    else:
+        print(f"Erro: {error}")
+
 # Comando SETUP - Painel principal
 @bot.command(name='setup')
 @is_owner_or_admin()
@@ -93,22 +118,19 @@ async def setup(ctx):
     
     categoria_status = "✅ Configurada" if config.get('categoria_id') else "❌ Não configurada"
     pix_status = "✅ Configurado" if config.get('pix_info') != 'Configure seu PIX com o comando .ConfigPix' else "❌ Não configurado"
-    qrcode_status = "✅ Configurado" if config.get('qrcode_url') else "❌ Não configurado"
     produtos_count = len(produtos)
     produtos_drop_count = len(produtos_drop)
     
     embed.add_field(name="📁 Categoria", value=categoria_status, inline=True)
     embed.add_field(name="💳 PIX", value=pix_status, inline=True)
-    embed.add_field(name="📱 QR Code", value=qrcode_status, inline=True)
     embed.add_field(name="📦 Produtos", value=f"{produtos_count} cadastrados", inline=True)
     embed.add_field(name="📋 Produtos Drop", value=f"{produtos_drop_count} cadastrados", inline=True)
     
-    embed.set_footer(text="Use os botões abaixo para gerenciar o bot")
+    embed.set_footer(text=f"Comando usado por: {ctx.author.name} | Use os botões abaixo para gerenciar o bot")
     
     # Criar botões
     btn_categoria = Button(label="📁 Configurar Categoria", style=discord.ButtonStyle.primary, row=0)
     btn_pix = Button(label="💳 Configurar PIX", style=discord.ButtonStyle.primary, row=0)
-    btn_qrcode = Button(label="📱 Configurar QR Code", style=discord.ButtonStyle.primary, row=0)
     
     btn_criar_produto = Button(label="➕ Criar Produto", style=discord.ButtonStyle.success, row=1)
     btn_criar_drop = Button(label="📋 Criar Produto Drop", style=discord.ButtonStyle.success, row=1)
@@ -122,8 +144,20 @@ async def setup(ctx):
     btn_listar_produtos = Button(label="📋 Listar Produtos", style=discord.ButtonStyle.secondary, row=4)
     btn_listar_drop = Button(label="📋 Listar Produtos Drop", style=discord.ButtonStyle.secondary, row=4)
     
+    # Função para verificar permissões nas interações
+    def check_permissions(interaction):
+        return (interaction.user.id == interaction.guild.owner_id or 
+                interaction.user.guild_permissions.administrator)
+    
     # Callbacks
     async def categoria_callback(interaction):
+        if not check_permissions(interaction):
+            await interaction.response.send_message(
+                "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                ephemeral=True
+            )
+            return
+        
         categorias = [cat for cat in interaction.guild.categories]
         
         if not categorias:
@@ -138,6 +172,13 @@ async def setup(ctx):
         select = Select(placeholder="Escolha uma categoria...", options=options)
         
         async def select_callback(select_interaction):
+            if not check_permissions(select_interaction):
+                await select_interaction.response.send_message(
+                    "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                    ephemeral=True
+                )
+                return
+            
             config['categoria_id'] = int(select.values[0])
             save_config(config)
             await select_interaction.response.send_message(
@@ -158,6 +199,13 @@ async def setup(ctx):
         await interaction.response.send_message(embed=embed_cat, view=view_select, ephemeral=True)
     
     async def pix_callback(interaction):
+        if not check_permissions(interaction):
+            await interaction.response.send_message(
+                "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                ephemeral=True
+            )
+            return
+        
         modal = Modal(title="Configurar PIX")
         
         pix_input = TextInput(
@@ -185,49 +233,36 @@ async def setup(ctx):
         modal.on_submit = on_submit
         await interaction.response.send_modal(modal)
     
-    async def qrcode_callback(interaction):
-        await interaction.response.send_message(
-            "📱 Envie a imagem do QR Code PIX neste canal (você tem 60 segundos):",
-            ephemeral=True
-        )
-        
-        def check(m):
-            return m.author == interaction.user and m.channel == interaction.channel and len(m.attachments) > 0
-        
-        try:
-            msg = await bot.wait_for('message', timeout=60.0, check=check)
-            
-            if msg.attachments:
-                attachment = msg.attachments[0]
-                
-                if attachment.content_type and attachment.content_type.startswith('image/'):
-                    config['qrcode_url'] = attachment.url
-                    save_config(config)
-                    
-                    embed_qr = discord.Embed(
-                        title="✅ QR Code Configurado",
-                        description="QR Code do PIX configurado com sucesso!",
-                        color=discord.Color.green()
-                    )
-                    embed_qr.set_image(url=attachment.url)
-                    
-                    await interaction.followup.send(embed=embed_qr, ephemeral=True)
-                    await msg.delete()
-                else:
-                    await interaction.followup.send("❌ O arquivo enviado não é uma imagem válida!", ephemeral=True)
-            
-        except asyncio.TimeoutError:
-            await interaction.followup.send("❌ Tempo esgotado! Tente novamente.", ephemeral=True)
-    
     async def criar_produto_callback(interaction):
+        if not check_permissions(interaction):
+            await interaction.response.send_message(
+                "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                ephemeral=True
+            )
+            return
+        
         modal = CriarProdutoModal()
         await interaction.response.send_modal(modal)
     
     async def criar_drop_callback(interaction):
+        if not check_permissions(interaction):
+            await interaction.response.send_message(
+                "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                ephemeral=True
+            )
+            return
+        
         modal = CriarProdutoDropModal1()
         await interaction.response.send_modal(modal)
     
     async def editar_produto_callback(interaction):
+        if not check_permissions(interaction):
+            await interaction.response.send_message(
+                "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                ephemeral=True
+            )
+            return
+        
         if not produtos:
             await interaction.response.send_message("❌ Nenhum produto cadastrado!", ephemeral=True)
             return
@@ -244,6 +279,13 @@ async def setup(ctx):
         select = Select(placeholder="Escolha o produto para editar...", options=options[:25])
         
         async def select_callback(select_interaction):
+            if not check_permissions(select_interaction):
+                await select_interaction.response.send_message(
+                    "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                    ephemeral=True
+                )
+                return
+            
             prod_id = select.values[0]
             produto = produtos[prod_id]
             
@@ -263,6 +305,13 @@ async def setup(ctx):
         await interaction.response.send_message(embed=embed_edit, view=view_select, ephemeral=True)
     
     async def editar_drop_callback(interaction):
+        if not check_permissions(interaction):
+            await interaction.response.send_message(
+                "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                ephemeral=True
+            )
+            return
+        
         if not produtos_drop:
             await interaction.response.send_message("❌ Nenhum painel dropdown cadastrado!", ephemeral=True)
             return
@@ -280,6 +329,13 @@ async def setup(ctx):
         select = Select(placeholder="Escolha o painel dropdown para editar...", options=options[:25])
         
         async def select_callback(select_interaction):
+            if not check_permissions(select_interaction):
+                await select_interaction.response.send_message(
+                    "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                    ephemeral=True
+                )
+                return
+            
             drop_id = select.values[0]
             painel = produtos_drop[drop_id]
             
@@ -299,6 +355,13 @@ async def setup(ctx):
         await interaction.response.send_message(embed=embed_edit, view=view_select, ephemeral=True)
     
     async def enviar_painel_callback(interaction):
+        if not check_permissions(interaction):
+            await interaction.response.send_message(
+                "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                ephemeral=True
+            )
+            return
+        
         if not produtos:
             await interaction.response.send_message("❌ Nenhum produto cadastrado!", ephemeral=True)
             return
@@ -315,6 +378,13 @@ async def setup(ctx):
         select = Select(placeholder="Escolha o produto...", options=options[:25])
         
         async def select_callback(select_interaction):
+            if not check_permissions(select_interaction):
+                await select_interaction.response.send_message(
+                    "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                    ephemeral=True
+                )
+                return
+            
             prod_id = select.values[0]
             produto = produtos[prod_id]
             
@@ -360,6 +430,13 @@ async def setup(ctx):
         await interaction.response.send_message(embed=embed_enviar, view=view_select, ephemeral=True)
     
     async def enviar_drop_callback(interaction):
+        if not check_permissions(interaction):
+            await interaction.response.send_message(
+                "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                ephemeral=True
+            )
+            return
+        
         if not produtos_drop:
             await interaction.response.send_message("❌ Nenhum painel dropdown cadastrado!", ephemeral=True)
             return
@@ -377,6 +454,13 @@ async def setup(ctx):
         select = Select(placeholder="Escolha o painel dropdown...", options=options[:25])
         
         async def select_callback(select_interaction):
+            if not check_permissions(select_interaction):
+                await select_interaction.response.send_message(
+                    "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                    ephemeral=True
+                )
+                return
+            
             drop_id = select.values[0]
             painel = produtos_drop[drop_id]
             
@@ -446,6 +530,13 @@ async def setup(ctx):
         await interaction.response.send_message(embed=embed_enviar, view=view_select, ephemeral=True)
     
     async def listar_produtos_callback(interaction):
+        if not check_permissions(interaction):
+            await interaction.response.send_message(
+                "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                ephemeral=True
+            )
+            return
+        
         if not produtos:
             await interaction.response.send_message("❌ Nenhum produto cadastrado ainda!", ephemeral=True)
             return
@@ -467,6 +558,13 @@ async def setup(ctx):
         await interaction.response.send_message(embed=embed_lista, ephemeral=True)
     
     async def listar_drop_callback(interaction):
+        if not check_permissions(interaction):
+            await interaction.response.send_message(
+                "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                ephemeral=True
+            )
+            return
+        
         if not produtos_drop:
             await interaction.response.send_message("❌ Nenhum produto dropdown cadastrado ainda!", ephemeral=True)
             return
@@ -495,7 +593,6 @@ async def setup(ctx):
     # Atribuir callbacks
     btn_categoria.callback = categoria_callback
     btn_pix.callback = pix_callback
-    btn_qrcode.callback = qrcode_callback
     btn_criar_produto.callback = criar_produto_callback
     btn_criar_drop.callback = criar_drop_callback
     btn_editar_produto.callback = editar_produto_callback
@@ -509,7 +606,6 @@ async def setup(ctx):
     view = View(timeout=None)
     view.add_item(btn_categoria)
     view.add_item(btn_pix)
-    view.add_item(btn_qrcode)
     view.add_item(btn_criar_produto)
     view.add_item(btn_criar_drop)
     view.add_item(btn_editar_produto)
@@ -537,7 +633,13 @@ async def ajuda(ctx):
         inline=False
     )
     
-    embed.set_footer(text="Use .setup para gerenciar tudo facilmente!")
+    embed.add_field(
+        name="👑 Permissões Necessárias",
+        value="• Dono do Servidor\n• Administrador",
+        inline=False
+    )
+    
+    embed.set_footer(text=f"Solicitado por: {ctx.author.name} | Use .setup para gerenciar tudo facilmente!")
     
     await ctx.send(embed=embed)
 
@@ -565,6 +667,14 @@ async def config_categoria(ctx):
     select = Select(placeholder="Escolha uma categoria...", options=options)
     
     async def select_callback(interaction):
+        # Verificar permissão na interação
+        if interaction.user.id != ctx.guild.owner_id and not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                ephemeral=True
+            )
+            return
+        
         config['categoria_id'] = int(select.values[0])
         save_config(config)
         await interaction.response.send_message(
@@ -1178,8 +1288,7 @@ async def criar_carrinho(interaction, produto, prod_id):
     
     aprovar_btn = Button(label="✅ Aprovar Pagamento", style=discord.ButtonStyle.success)
     fechar_btn = Button(label="🔒 Fechar", style=discord.ButtonStyle.danger)
-    qrcode_btn = Button(label="📱 QR Code", style=discord.ButtonStyle.primary)
-    pix_btn = Button(label="💳 PIX", style=discord.ButtonStyle.secondary)
+    pix_btn = Button(label="💳 PIX", style=discord.ButtonStyle.primary)
     
     async def aprovar_callback(btn_interaction):
         if btn_interaction.user.id != guild.owner_id and not btn_interaction.user.guild_permissions.administrator:
@@ -1205,22 +1314,6 @@ async def criar_carrinho(interaction, produto, prod_id):
         await asyncio.sleep(5)
         await canal.delete()
     
-    async def qrcode_callback(btn_interaction):
-        if config.get('qrcode_url'):
-            embed_qr = discord.Embed(
-                title="📱 QR Code PIX",
-                description="Escaneie o QR Code abaixo para realizar o pagamento:",
-                color=discord.Color.green()
-            )
-            embed_qr.set_image(url=config['qrcode_url'])
-            embed_qr.add_field(name="💰 Valor", value=f"R$ {produto['preco']}", inline=True)
-            await btn_interaction.response.send_message(embed=embed_qr, ephemeral=True)
-        else:
-            await btn_interaction.response.send_message(
-                "❌ QR Code não configurado! Peça ao administrador para usar .setup",
-                ephemeral=True
-            )
-    
     async def pix_callback(btn_interaction):
         embed_pix = discord.Embed(
             title="💳 Informações PIX",
@@ -1233,11 +1326,9 @@ async def criar_carrinho(interaction, produto, prod_id):
     
     aprovar_btn.callback = aprovar_callback
     fechar_btn.callback = fechar_callback
-    qrcode_btn.callback = qrcode_callback
     pix_btn.callback = pix_callback
     
     view = View(timeout=None)
-    view.add_item(qrcode_btn)
     view.add_item(pix_btn)
     view.add_item(aprovar_btn)
     view.add_item(fechar_btn)
@@ -1278,6 +1369,14 @@ async def config_pix(ctx):
     modal.on_submit = on_submit
     
     async def button_callback(interaction):
+        # Verificar permissão
+        if interaction.user.id != ctx.guild.owner_id and not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message(
+                "❌ Você precisa ser Administrador ou Dono do Servidor!",
+                ephemeral=True
+            )
+            return
+        
         await interaction.response.send_modal(modal)
     
     button.callback = button_callback
@@ -1285,41 +1384,6 @@ async def config_pix(ctx):
     view.add_item(button)
     
     await ctx.send("💳 Clique no botão para configurar o PIX:", view=view)
-
-# Comando para configurar QR Code
-@bot.command(name='ConfigQRCode')
-@is_owner_or_admin()
-async def config_qrcode(ctx):
-    await ctx.send("📱 Envie a imagem do QR Code PIX:")
-    
-    def check(m):
-        return m.author == ctx.author and m.channel == ctx.channel and len(m.attachments) > 0
-    
-    try:
-        msg = await bot.wait_for('message', timeout=60.0, check=check)
-        
-        if msg.attachments:
-            attachment = msg.attachments[0]
-            
-            if attachment.content_type and attachment.content_type.startswith('image/'):
-                config['qrcode_url'] = attachment.url
-                save_config(config)
-                
-                embed = discord.Embed(
-                    title="✅ QR Code Configurado",
-                    description="QR Code do PIX configurado com sucesso!",
-                    color=discord.Color.green()
-                )
-                embed.set_image(url=attachment.url)
-                
-                await ctx.send(embed=embed)
-            else:
-                await ctx.send("❌ O arquivo enviado não é uma imagem válida!")
-        else:
-            await ctx.send("❌ Nenhuma imagem foi anexada!")
-            
-    except asyncio.TimeoutError:
-        await ctx.send("❌ Tempo esgotado! Use o comando novamente.")
 
 # Tratar menções no canal de carrinho
 @bot.event
